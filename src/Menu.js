@@ -1,4 +1,3 @@
-const ROOM_KEY = "futbol_rooms_v1";
 const ACCOUNT_KEY = "futbol_account_v1";
 
 export class Menu {
@@ -14,6 +13,8 @@ export class Menu {
       teamSize: "3v3",
       matchTime: 10,
       roomCode: "",
+      roomAction: "create",
+      nickname: "",
       avatar: {
         hair: "Qisa",
         beard: "Yox",
@@ -197,12 +198,9 @@ export class Menu {
         createdAt: Date.now(),
       };
 
-      const rooms = this.loadRooms();
-      rooms[code] = room;
-      localStorage.setItem(ROOM_KEY, JSON.stringify(rooms));
-
       get("roomCode").value = code;
       this.state.roomCode = code;
+      this.state.roomAction = "create";
       roomInfo.textContent = `Otaq quruldu! Kod: ${code}`;
       roomInfo.style.color = "#49d17d";
       this.onStartRoomMatch?.({ ...this.state, room });
@@ -217,15 +215,9 @@ export class Menu {
         return;
       }
 
-      const rooms = this.loadRooms();
-      const room = rooms[code];
-      if (!room) {
-        roomInfo.textContent = "Kod tapılmadı.";
-        roomInfo.style.color = "#ff5a5a";
-        return;
-      }
-
-      roomInfo.textContent = `Otağa qoşuldun: ${room.code} (${room.teamSize})`;
+      const room = { code };
+      this.state.roomAction = "join";
+      roomInfo.textContent = `Otaq koduna qoşulma sorğusu göndərildi: ${room.code}`;
       roomInfo.style.color = "#49d17d";
       this.onStartRoomMatch?.({ ...this.state, room });
     });
@@ -505,6 +497,7 @@ export class Menu {
     if (get("teamSize")) this.state.teamSize = get("teamSize").value;
     if (get("matchTime")) this.state.matchTime = Math.min(15, Math.max(5, Number(get("matchTime").value) || 10));
     if (get("roomCode")) this.state.roomCode = get("roomCode").value.trim().toUpperCase();
+    this.state.nickname = this.account?.nickname || "Oyuncu";
     if (get("hair")) this.state.avatar.hair = get("hair").value;
     if (get("beard")) this.state.avatar.beard = get("beard").value;
     if (get("skin")) this.state.avatar.skin = get("skin").value;
@@ -528,14 +521,6 @@ export class Menu {
       return JSON.parse(localStorage.getItem("futbol_all_accounts") || "[]");
     } catch {
       return [];
-    }
-  }
-
-  loadRooms() {
-    try {
-      return JSON.parse(localStorage.getItem(ROOM_KEY) || "{}");
-    } catch {
-      return {};
     }
   }
 

@@ -138,6 +138,78 @@ window.game = { scene, camera, player, physics, ball, THREE, CANNON };
 let mode = "menu";
 let remainingTime = 0;
 let roomCode = "";
+let pendingRoomAction = "join";
+let isRoomHost = false;
+let myPlayerId = null;
+let networkSendTimer = 0;
+const remotePlayers = new Map();
+const socket = window.io ? window.io() : null;
+
+function buildRemotePlayerMesh() {
+  const root = new THREE.Group();
+  const bodyMat = new THREE.MeshStandardMaterial({ color: 0xffb347, roughness: 0.6 });
+  const skinMat = new THREE.MeshStandardMaterial({ color: 0xd8a87d, roughness: 0.8 });
+
+  const torso = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.75, 0.3), bodyMat);
+  torso.position.y = 1.35;
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.23, 12, 10), skinMat);
+  head.position.y = 1.84;
+  const legL = new THREE.Mesh(new THREE.CylinderGeometry(0.11, 0.09, 0.8, 8), skinMat);
+  legL.position.set(-0.16, 0.45, 0);
+  const legR = legL.clone();
+  legR.position.x = 0.16;
+
+  root.add(torso, head, legL, legR);
+  root.traverse((obj) => {
+    if (obj.isMesh) obj.castShadow = true;
+  });
+  return root;
+}
+
+function clearRemotePlayers() {
+  for (const remote of remotePlayers.values()) {
+    scene.remove(remote.mesh);
+  }
+  remotePlayers.clear();
+}
+
+function upsertRemotePlayer(id, playerData = {}) {
+  if (!id || id === myPlayerId) return;
+  let remote = remotePlayers.get(id);
+  if (!remote) {
+    const mesh = buildRemotePlayerMesh();
+    scene.add(mesh);
+    remote = {
+      mesh,
+      targetPos: new THREE.Vector3(),
+      targetRot: 0,
+    };
+    remotePlayers.set(id, remote);
+  }
+
+  const pos = playerData.position || { x: 0, y: 0, z: 0 };
+  remote.targetPos.set(pos.x || 0, pos.y || 0, pos.z || 0);
+  remote.targetRot = playerData.rotation || 0;
+  if (!remote.mesh.userData.inited) {
+    remote.mesh.position.copy(remote.targetPos);
+    remote.mesh.rotation.y = remote.targetRot;
+    remote.mesh.userData.inited = true;
+  }
+}
+
+function removeRemotePlayer(id) {
+  const remote = remotePlayers.get(id);
+  if (!remote) return;
+  scene.remove(remote.mesh);
+  remotePlayers.delete(id);
+}
+
+function leaveRoomSession() {
+  clearRemotePlayers();
+  isRoomHost = false;
+  myPlayerId = socket?.id || null;
+  networkSendTimer = 0;
+}
 
 function formatTime(seconds) {
   const m = Math.max(0, Math.floor(seconds / 60));
@@ -174,6 +246,78 @@ function resetBallToKickoff() {
   ball.body.angularVelocity.set(0, 0, 0);
 }
 
+if (socket) {
+  socket.on("connect", () => {
+    myPlayerId = socket.id;
+  });
+
+  socket.on("disconnect", () => {
+    if (mode === "room") {
+      leaveRoomSession();
+      menu.show();
+      setMode("menu");
+    }
+  });
+
+  socket.on("roomJoined", (payload) => {
+    myPlayerId = payload.playerId;
+    roomCode = payload.code;
+    isRoomHost = !!payload.isHost;
+    remainingTime = (payload.settings?.matchTime || 10) * 60;
+    clearRemotePlayers();
+
+    const players = payload.players || {};
+    Object.keys(players).forEach((id) => {
+      if (id !== myPlayerId) upsertRemotePlayer(id, players[id]);
+    });
+
+    menu.hide();
+    rematchOverlay.style.display = "none";
+    setMode("room");
+  });
+
+  socket.on("playerJoined", (data) => {
+    upsertRemotePlayer(data.id, data.player);
+  });
+
+  socket.on("playerMoved", (data) => {
+    upsertRemotePlayer(data.id, data);
+  });
+
+  socket.on("playerLeft", (data) => {
+    removeRemotePlayer(data.id);
+  });
+
+  socket.on("hostChanged", (data) => {
+    isRoomHost = data.newHostId === myPlayerId;
+  });
+
+  socket.on("ballSync", (ballDataSync) => {
+    if (isRoomHost || mode !== "room") return;
+    ball.body.position.set(ballDataSync.x, ballDataSync.y, ballDataSync.z);
+    ball.body.velocity.set(ballDataSync.vx, ballDataSync.vy, ballDataSync.vz);
+  });
+
+  socket.on("ballKicked", (data) => {
+    if (data.playerId === myPlayerId || mode !== "room") return;
+    ball.body.velocity.set(data.velocity.x, data.velocity.y, data.velocity.z);
+    if (data.angularVelocity) {
+      ball.body.angularVelocity.set(
+        data.angularVelocity.x || 0,
+        data.angularVelocity.y || 0,
+        data.angularVelocity.z || 0
+      );
+    }
+  });
+
+  socket.on("roomError", (msg) => {
+    alert(msg || "Otaq xətası");
+    leaveRoomSession();
+    menu.show();
+    setMode("menu");
+  });
+}
+
 menu.onStartTraining = (state) => {
   audio.ensureStarted();
   audio.setVolumes(state);
@@ -201,10 +345,29 @@ menu.onStartRoomMatch = (state) => {
 
   roomCode = state.room?.code || state.roomCode || "ROOM";
   remainingTime = (state.room?.matchTime || state.matchTime || 10) * 60;
+  pendingRoomAction = state.roomAction || (state.room?.createdAt ? "create" : "join");
+  leaveRoomSession();
 
   rematchOverlay.style.display = "none";
-  menu.hide();
-  setMode("room");
+  if (!socket) {
+    alert("Socket bağlantısı tapılmadı.");
+    return;
+  }
+
+  if (!socket.connected) socket.connect();
+  const payload = {
+    code: roomCode,
+    teamSize: state.teamSize,
+    matchTime: state.matchTime,
+    nickname: state.nickname || "Oyuncu",
+    avatar: state.avatar || {},
+  };
+
+  if (pendingRoomAction === "create") {
+    socket.emit("createRoom", payload);
+  } else {
+    socket.emit("joinRoom", payload);
+  }
 };
 
 rematchBtn.onclick = () => {
@@ -219,6 +382,8 @@ rematchBtn.onclick = () => {
 
 exitToMenuBtn.onclick = () => {
   rematchOverlay.style.display = "none";
+  if (mode === "room" && socket?.connected) socket.disconnect();
+  leaveRoomSession();
   menu.show();
   setMode("menu");
 };
@@ -317,6 +482,17 @@ player.onChargeRelease = (charge) => {
     ball.body.angularVelocity.y = spinAmount;
   }
 
+  if (mode === "room" && socket?.connected) {
+    socket.emit("ballKick", {
+      velocity: { x: vx, y: vy, z: vz },
+      angularVelocity: {
+        x: ball.body.angularVelocity.x,
+        y: ball.body.angularVelocity.y,
+        z: ball.body.angularVelocity.z,
+      },
+    });
+  }
+
   audio.kick(sfxType);
 };
 
@@ -327,6 +503,8 @@ window.addEventListener("keydown", (e) => {
   }
 
   if (e.code === "Escape") {
+    if (mode === "room" && socket?.connected) socket.disconnect();
+    leaveRoomSession();
     menu.show();
     setMode("menu");
     return;
@@ -372,7 +550,43 @@ function animate() {
       ball.body.velocity.z += side.z;
     }
 
+    for (const remote of remotePlayers.values()) {
+      remote.mesh.position.lerp(remote.targetPos, Math.min(1, dt * 12));
+      const rotDiff = remote.targetRot - remote.mesh.rotation.y;
+      remote.mesh.rotation.y += rotDiff * Math.min(1, dt * 12);
+    }
+
     if (mode === "room") {
+      networkSendTimer += dt;
+      if (socket?.connected && networkSendTimer >= 0.05) {
+        networkSendTimer = 0;
+        socket.emit("playerUpdate", {
+          position: {
+            x: player.mesh.position.x,
+            y: player.mesh.position.y,
+            z: player.mesh.position.z,
+          },
+          rotation: player.mesh.rotation.y,
+          velocity: {
+            x: player.velocity.x,
+            y: player.velocity.y,
+            z: player.velocity.z,
+          },
+          animState: {},
+        });
+
+        if (isRoomHost) {
+          socket.emit("ballUpdate", {
+            x: ball.body.position.x,
+            y: ball.body.position.y,
+            z: ball.body.position.z,
+            vx: ball.body.velocity.x,
+            vy: ball.body.velocity.y,
+            vz: ball.body.velocity.z,
+          });
+        }
+      }
+
       remainingTime = Math.max(0, remainingTime - dt);
       timerValue.textContent = formatTime(remainingTime);
       if (remainingTime <= 0) {
