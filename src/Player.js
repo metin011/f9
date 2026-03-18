@@ -1,4 +1,4 @@
-﻿import * as THREE from "https://unpkg.com/three@0.165.0/build/three.module.js";
+import * as THREE from "https://unpkg.com/three@0.165.0/build/three.module.js";
 import { GLTFLoader } from "https://unpkg.com/three@0.165.0/examples/jsm/loaders/GLTFLoader.js";
 import { FBXLoader } from "https://unpkg.com/three@0.165.0/examples/jsm/loaders/FBXLoader.js";
 import * as SkeletonUtils from "https://unpkg.com/three@0.165.0/examples/jsm/utils/SkeletonUtils.js";
@@ -56,6 +56,7 @@ const KIT_PRESETS = {
   Besiktas: { primary: 0xf5f5f5, sleeve: 0xdfdfdf, trim: 0x1b1b1b, sock: 0xffffff },
   "Man City": { primary: 0x6fb8ff, sleeve: 0x57a7f4, trim: 0xffffff, sock: 0x9fd3ff },
   Liverpool: { primary: 0xa10f24, sleeve: 0x810b1d, trim: 0xf0f0f0, sock: 0xa10f24 },
+  Rematch: { primary: 0xff4500, sleeve: 0xff5e1a, trim: 0xffffff, sock: 0x333333 },
 };
 
 const BOOT_PRESETS = {
@@ -72,12 +73,19 @@ const BOOT_PRESETS = {
   "Ocean Mint": 0x56efd0,
   "Rose Chrome": 0xff8fb0,
   "Pure White": 0xffffff,
+  "Rematch Elite": 0xff5e1a,
+};
+
+const CUSTOM_PLAYER_ANIMS = {
+  idle: "/Oyuncu_yeni/Normal%20y%C3%BCr%C3%BCme.fbx",
+  dribble: "/Oyuncu_yeni/Dribling.fbx",
+  sprint: "/Oyuncu_yeni/Shift%20bas%C4%B1l%C4%B1yken%20ko%C5%9Fma.fbx",
 };
 
 const RPM_ANIM_SOURCES = {
-  idle: "/animasyonlar/dribble.fbx",
-  dribble: "/animasyonlar/dribble.fbx",
-  sprint: "/animasyonlar/dribble.fbx",
+  idle: CUSTOM_PLAYER_ANIMS.idle,
+  dribble: CUSTOM_PLAYER_ANIMS.dribble,
+  sprint: CUSTOM_PLAYER_ANIMS.sprint,
   jogBack: "/animasyonlar/jog_back.fbx",
   kickShot: "/animasyonlar/shot.fbx",
   kickBicycle: "/animasyonlar/bicycle_kick.fbx",
@@ -160,6 +168,10 @@ export class Player {
     this.strikeBlend = 0;
     this.gltfLoader = new GLTFLoader();
     this.fbxLoader = new FBXLoader();
+    this.textureLoader = new THREE.TextureLoader();
+    this.customModel = null;
+    this.customModelPath = null;
+    this.customTexturePath = null;
     this.rpmAvatar = null;
     this.rpmRig = null;
     this.rpmBaseRot = new Map();
@@ -168,6 +180,9 @@ export class Player {
     this.rpmCurrentAction = null;
     this.rpmCurrentActionName = null;
     this.rpmAnimReady = false;
+    this.rpmAnimYawOffset = 0;
+    this.rpmAnimYawHipsName = "Hips";
+    this.useDirectFbxClips = false;
     this.pendingRpmKick = false;
     this.pendingRpmKickName = "kickShot";
     this.pendingRpmSkillName = null;
@@ -225,6 +240,7 @@ export class Player {
     this.cameraYaw = 0; // The angle around the player
     this.cameraDistance = this.cameraDistanceBase;
     this.cameraHeight = this.cameraHeightBase;
+    this.rpmAnimCoordRotation = 0;
 
     this.pBody = this.physics.createPlayerBody();
     this.setPerformanceProfile("high");
@@ -482,6 +498,13 @@ export class Player {
     this.eyeWhiteMat = new THREE.MeshStandardMaterial({ color: 0xf8f8f8, roughness: 0.3, metalness: 0.0 });
     this.pupilMat = new THREE.MeshStandardMaterial({ color: 0x101010, roughness: 0.4, metalness: 0.0 });
     this.browMat = new THREE.MeshStandardMaterial({ color: 0x2a1d14, roughness: 0.75 });
+    this.shinGuardMat = new THREE.MeshPhysicalMaterial({
+      color: 0x1a1a1a,
+      roughness: 0.3,
+      metalness: 0.2,
+      clearcoat: 0.4,
+      clearcoatRoughness: 0.1,
+    });
 
     const torso = new THREE.Group();
     torso.position.y = 1.46;
@@ -614,6 +637,11 @@ export class Player {
       sockBand.rotation.x = Math.PI / 2;
       sockBand.position.y = -0.14;
       kneePivot.add(sockBand);
+
+      const shinGuard = markShadow(new THREE.Mesh(new THREE.CapsuleGeometry(0.082, 0.16, 4, 12), this.shinGuardMat));
+      shinGuard.position.set(0, -0.21, 0.032);
+      shinGuard.scale.set(1.08, 1, 0.65);
+      kneePivot.add(shinGuard);
 
       const anklePivot = new THREE.Group();
       anklePivot.position.y = -0.42;
@@ -1174,6 +1202,7 @@ export class Player {
 
   loadReadyPlayerAvatar(url, options = {}) {
     const showProceduralWhileLoading = !!options.showProceduralWhileLoading;
+    const rotationFix = options.rotationFix || null;
     if (!url || typeof url !== "string") {
       this.clearReadyPlayerAvatar(true);
       return Promise.resolve(false);
@@ -1218,7 +1247,15 @@ export class Player {
 
           const scaled = new THREE.Box3().setFromObject(model);
           model.position.y -= scaled.min.y;
-          model.rotation.y = 0;
+          if (rotationFix) {
+            model.rotation.set(
+              rotationFix.x ?? 0,
+              rotationFix.y ?? 0,
+              rotationFix.z ?? 0
+            );
+          } else {
+            model.rotation.y = 0;
+          }
 
           this.mesh.add(model);
           this.rpmAvatar = model;
@@ -1233,6 +1270,140 @@ export class Player {
             return;
           }
           this.clearReadyPlayerAvatar(true);
+          resolve(false);
+        }
+      );
+    });
+  }
+
+  loadCustomModel(fbxPath, texturePath, options = {}) {
+    const nextFbxPath = typeof fbxPath === "string" ? fbxPath.trim() : "";
+    const nextTexturePath = typeof texturePath === "string" ? texturePath.trim() : "";
+    const hasTexturePath = !!nextTexturePath;
+    const normalizedTexturePath = hasTexturePath ? nextTexturePath : null;
+    const rotationFix = options.rotationFix || null;
+    const preferExternalAnims = !!options.preferExternalAnims;
+    const useDirectFbxClips = !!options.useDirectFbxClips;
+    if (!nextFbxPath) return Promise.resolve(false);
+
+    if (this.customModel && this.customModelPath === nextFbxPath && this.customTexturePath === normalizedTexturePath) {
+      this.setProceduralVisible(false);
+      this.rpmOnly = true;
+      return Promise.resolve(true);
+    }
+
+    if (this.customModel) {
+      this.mesh.remove(this.customModel);
+      this.customModel.traverse((obj) => {
+        if (obj.isMesh) {
+          obj.geometry?.dispose?.();
+          if (Array.isArray(obj.material)) obj.material.forEach((m) => m?.dispose?.());
+          else obj.material?.dispose?.();
+        }
+      });
+      this.customModel = null;
+      this.customModelPath = null;
+      this.customTexturePath = null;
+    }
+
+    return new Promise((resolve) => {
+      this.fbxLoader.load(
+        encodeURI(nextFbxPath),
+        (fbx) => {
+          const applyModel = (tex, usedTexturePath = null) => {
+            if (tex) {
+              tex.colorSpace = THREE.SRGBColorSpace;
+              tex.flipY = true;
+            }
+
+            fbx.traverse((child) => {
+              if (child.isMesh) {
+                if (tex) {
+                  child.material = new THREE.MeshStandardMaterial({
+                    map: tex,
+                    color: 0xffffff,
+                    roughness: 0.65,
+                    metalness: 0.05
+                  });
+                }
+                child.castShadow = true;
+                child.receiveShadow = true;
+              }
+            });
+
+            const box = new THREE.Box3().setFromObject(fbx);
+            const height = box.max.y - box.min.y;
+            const targetHeight = 2.0;
+            fbx.scale.setScalar(targetHeight / Math.max(0.1, height));
+
+            const scaledBox = new THREE.Box3().setFromObject(fbx);
+            fbx.position.y = -scaledBox.min.y;
+
+            // Fix "sideways facing" issue. Some FBX files need a rotation offset.
+            if (rotationFix) {
+              fbx.rotation.set(
+                rotationFix.x ?? 0,
+                rotationFix.y ?? 0,
+                rotationFix.z ?? 0
+              );
+            } else {
+              // Based on "ileri koşmak yerine yana doğru koşuyo", the rig is likely 90deg offset internally.
+              fbx.rotation.y = Math.PI; // Keeps the visual facing correct as per user feedback
+              this.rpmAnimCoordRotation = Math.PI / 2; // Remap procedural anims by 90deg to match rig forward
+            }
+
+            this.clearReadyPlayerAvatar(false);
+            this.setProceduralVisible(false);
+
+            this.mesh.add(fbx);
+            this.customModel = fbx;
+            this.customModelPath = nextFbxPath;
+            this.customTexturePath = usedTexturePath;
+            this.rpmAvatar = fbx;
+
+            this.captureRpmRig(fbx);
+            this.resetBoneRotations(fbx);
+            this.rpmAnimYawOffset = options.animRotationFix ?? 0;
+            this.rpmAnimYawHipsName = this.rpmRig?.hips?.name || "Hips";
+            this.useDirectFbxClips = useDirectFbxClips;
+
+            // Priority to external animations (Normal walking, Dribbling, etc.)
+            // as internal fbx.animations might just be a static pose (T-Pose)
+            this.loadRpmFbxAnimations(fbx);
+
+            this.rpmOnly = true;
+            resolve(true);
+          };
+
+          const tryLoadTexture = (paths = []) => {
+            const next = paths.shift();
+            if (!next) {
+              applyModel(null, null);
+              return;
+            }
+            this.textureLoader.load(
+              encodeURI(next),
+              (tex) => applyModel(tex, next),
+              undefined,
+              () => tryLoadTexture(paths)
+            );
+          };
+
+          const baseDir = nextFbxPath.includes("/") ? nextFbxPath.slice(0, nextFbxPath.lastIndexOf("/")) : "";
+          const fallbackTexture = baseDir ? `${baseDir}/Deri.png` : "Deri.png";
+          const textureCandidates = [];
+          if (hasTexturePath) textureCandidates.push(nextTexturePath);
+          if (!hasTexturePath || nextTexturePath !== fallbackTexture) textureCandidates.push(fallbackTexture);
+
+          if (textureCandidates.length > 0) {
+            tryLoadTexture(textureCandidates);
+          } else {
+            applyModel(null, null);
+          }
+        },
+        undefined,
+        (err) => {
+          console.log("Custom model load failed:", err);
           resolve(false);
         }
       );
@@ -1301,14 +1472,127 @@ export class Player {
     });
   }
 
+  resetBoneRotations(root) {
+    if (!root) return;
+    root.traverse((obj) => {
+      if (obj.isBone) {
+        obj.rotation.set(0, 0, 0);
+        obj.quaternion.set(0, 0, 0, 1);
+      }
+    });
+  }
+
+  applyClipYawOffset(clip, yaw = 0, hipsName = "Hips") {
+    if (!clip || !yaw) return clip;
+    const hipsKey = String(hipsName || "Hips").toLowerCase();
+    const yawQuat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), yaw);
+    const tempQuat = new THREE.Quaternion();
+    const tempVec = new THREE.Vector3();
+    clip.tracks.forEach((track) => {
+      const name = String(track.name || "").toLowerCase();
+      if (name.includes(`${hipsKey}.quaternion`) && track instanceof THREE.QuaternionKeyframeTrack) {
+        const v = track.values;
+        for (let i = 0; i < v.length; i += 4) {
+          tempQuat.set(v[i], v[i + 1], v[i + 2], v[i + 3]);
+          tempQuat.premultiply(yawQuat);
+          v[i] = tempQuat.x;
+          v[i + 1] = tempQuat.y;
+          v[i + 2] = tempQuat.z;
+          v[i + 3] = tempQuat.w;
+        }
+      } else if (name.includes(`${hipsKey}.position`) && track instanceof THREE.VectorKeyframeTrack) {
+        const v = track.values;
+        for (let i = 0; i < v.length; i += 3) {
+          tempVec.set(v[i], v[i + 1], v[i + 2]);
+          tempVec.applyAxisAngle(new THREE.Vector3(0, 1, 0), yaw);
+          v[i] = tempVec.x;
+          v[i + 2] = tempVec.z;
+        }
+      }
+    });
+    clip.resetDuration();
+    return clip;
+  }
+
+  normalizeClipTrackNames(clip) {
+    if (!clip || !clip.tracks) return clip;
+    const normalizedTracks = clip.tracks.map((track) => {
+      const name = String(track.name || "");
+      if (!name.includes(".")) return track;
+      const parts = name.split(".");
+      const nodePath = parts[0];
+      const prop = parts.slice(1).join(".");
+      let node = nodePath;
+      if (node.includes("|")) node = node.split("|").pop();
+      if (node.includes(":")) node = node.split(":").pop();
+      node = node.replace(/mixamorig/gi, "");
+      node = node.replace(/^[_\\:\\|]+/, "");
+      const nextName = `${node}.${prop}`;
+      if (nextName === name) return track;
+      const TrackType = track.constructor;
+      const times = track.times.slice();
+      const values = track.values.slice();
+      const next = new TrackType(nextName, times, values);
+      if (track.getInterpolation) next.setInterpolation(track.getInterpolation());
+      return next;
+    });
+    return new THREE.AnimationClip(clip.name, clip.duration, normalizedTracks);
+  }
+
   setRpmPose(key, x = 0, y = 0, z = 0, lerpAlpha = 0.65) {
     const bone = this.rpmRig?.[key];
     const base = this.rpmBaseRot.get(key);
     if (!bone || !base) return;
+
+    let rx = x, ry = y, rz = z;
+    if (this.rpmAnimCoordRotation !== 0) {
+      const cos = Math.cos(this.rpmAnimCoordRotation);
+      const sin = Math.sin(this.rpmAnimCoordRotation);
+      // Rotate the Euler offsets around Y axis to match rig orientation
+      rx = x * cos + z * sin;
+      rz = -x * sin + z * cos;
+    }
+
     const a = THREE.MathUtils.clamp(lerpAlpha, 0, 1);
-    bone.rotation.x = THREE.MathUtils.lerp(bone.rotation.x, base.x + x, a);
-    bone.rotation.y = THREE.MathUtils.lerp(bone.rotation.y, base.y + y, a);
-    bone.rotation.z = THREE.MathUtils.lerp(bone.rotation.z, base.z + z, a);
+    bone.rotation.x = THREE.MathUtils.lerp(bone.rotation.x, base.x + rx, a);
+    bone.rotation.y = THREE.MathUtils.lerp(bone.rotation.y, base.y + ry, a);
+    bone.rotation.z = THREE.MathUtils.lerp(bone.rotation.z, base.z + rz, a);
+  }
+
+  loadInternalAnimations(fbx) {
+    this.rpmAnimReady = false;
+    this.rpmMixer = new THREE.AnimationMixer(fbx);
+    this.rpmActions = {};
+    
+    // Map common names if they exist in the file
+    fbx.animations.forEach((clip) => {
+      const name = clip.name.toLowerCase();
+      let actionName = null;
+      if (name.includes("idle")) actionName = "idle";
+      else if (name.includes("run") || name.includes("walk") || name.includes("dribble")) actionName = "dribble";
+      else if (name.includes("sprint")) actionName = "sprint";
+      else if (name.includes("kick") || name.includes("shot")) actionName = "kickShot";
+      
+      if (actionName) {
+        this.applyClipYawOffset(clip, this.rpmAnimYawOffset, this.rpmAnimYawHipsName);
+        const action = this.rpmMixer.clipAction(clip);
+        action.enabled = true;
+        action.setEffectiveWeight(1);
+        this.rpmActions[actionName] = action;
+      }
+    });
+
+    // If no specific names found, just take the first few as defaults
+    if (!this.rpmActions.idle && fbx.animations[0]) {
+      this.applyClipYawOffset(fbx.animations[0], this.rpmAnimYawOffset, this.rpmAnimYawHipsName);
+      this.rpmActions.idle = this.rpmMixer.clipAction(fbx.animations[0]);
+    }
+
+    this.rpmAnimReady = Object.keys(this.rpmActions).length > 0;
+    if (this.rpmAnimReady) {
+      const first = Object.keys(this.rpmActions)[0];
+      this.playRpmAction(first, 0.01);
+    }
   }
 
   loadFbxAsset(url) {
@@ -1334,16 +1618,36 @@ export class Player {
 
     for (const [name, path] of entries) {
       try {
-        const fbx = await this.loadFbxAsset(path);
+        let fbx;
+        try {
+          fbx = await this.loadFbxAsset(path);
+        } catch (err) {
+          // If a skill or celebration animation is missing, try a fallback
+          if (RPM_SKILL_ACTIONS.has(name) || name.includes("celebration")) {
+            const fallbackPath = name === "kickShot" || name === "kickBicycle" ? RPM_ANIM_SOURCES.kickShot : RPM_ANIM_SOURCES.dribble;
+            fbx = await this.loadFbxAsset(fallbackPath);
+          } else {
+            throw err;
+          }
+        }
+        
         const sourceClip = fbx.animations?.[0];
         if (!sourceClip) continue;
 
-        const retargeted = SkeletonUtils.retargetClip(targetModel, fbx, sourceClip, {
-          useFirstFramePosition: name !== "idle",
-        });
-        if (!retargeted) continue;
+        let clipToUse = null;
+        if (this.useDirectFbxClips) {
+          clipToUse = this.normalizeClipTrackNames(sourceClip);
+        } else {
+          const retargeted = SkeletonUtils.retargetClip(targetModel, fbx, sourceClip, {
+            useFirstFramePosition: name !== "idle",
+          });
+          if (!retargeted) continue;
+          clipToUse = retargeted;
+        }
+        if (!clipToUse) continue;
+        this.applyClipYawOffset(clipToUse, this.rpmAnimYawOffset, this.rpmAnimYawHipsName);
 
-        const action = this.rpmMixer.clipAction(retargeted);
+        const action = this.rpmMixer.clipAction(clipToUse);
         action.enabled = true;
         action.clampWhenFinished = RPM_ONE_SHOT_ACTIONS.has(name);
         action.loop = RPM_ONE_SHOT_ACTIONS.has(name) ? THREE.LoopOnce : THREE.LoopRepeat;
@@ -1355,7 +1659,6 @@ export class Player {
           RPM_MISSING_CLIP_LOGS.add(path);
           console.info(`[SkillClipFallback] Missing RPM skill clip: ${path}`);
         }
-        // Keep fallback procedural RPM animation if any FBX clip fails.
       }
     }
 
@@ -1363,7 +1666,7 @@ export class Player {
     this.rpmAnimReady = Object.keys(this.rpmActions).length > 0;
     if (this.rpmAnimReady) {
       this.playRpmAction("idle", 0.01);
-      this.rpmCurrentAction?.setEffectiveTimeScale(0.24);
+      this.rpmCurrentAction?.setEffectiveTimeScale(0.0);
     }
   }
 
@@ -1388,13 +1691,9 @@ export class Player {
     this.rpmMixer.update(dt);
 
     if (this.pendingRpmKick) {
-      const kickName = this.pendingRpmKickName;
       this.pendingRpmKick = false;
       this.pendingRpmKickName = "kickShot";
-      if (this.rpmActions[kickName]) {
-        this.playRpmAction(kickName, 0.05);
-        return true;
-      }
+      return false; // Force procedural kick
     }
 
     if (
@@ -1402,31 +1701,55 @@ export class Player {
       this.rpmCurrentAction &&
       this.rpmCurrentAction.isRunning()
     ) {
-      return true;
+      // If we want procedural bits to overlay or take over, we return false.
+      // For "old" animations, return false.
+      return false; 
     }
 
+    const hasBall = arguments.length > 4 ? !!arguments[4] : false;
     let target = "idle";
     let timeScale = 1.0;
-    if (isMoving) target = "dribble";
 
-    if (target === "idle") timeScale = 0.24;
-    if (target === "dribble") {
-      if (inputForward < -0.15) timeScale = 0.9;
-      else if (sprinting) timeScale = 1.6;
-      else timeScale = 1.0;
+    if (isMoving) {
+      if (sprinting && this.rpmActions.sprint) {
+        target = "sprint";
+      } else if (hasBall && this.rpmActions.dribble) {
+        target = "dribble";
+      } else {
+        target = "idle"; // Walk fallback
+      }
+      timeScale = 1.0;
+    } else {
+      target = "idle";
+      timeScale = 1.0;
     }
 
-    if (!this.rpmActions[target]) target = this.rpmActions.dribble ? "dribble" : "idle";
+    // Force "old" (procedural) movement animations if they are in basic states
+    // This satisfies the request: "eski koşma şut felan animasyonlarını buna ekle"
+    if (target === "idle" || target === "dribble" || target === "sprint") {
+      if (this.rpmCurrentAction) {
+        this.rpmCurrentAction.fadeOut(0.2);
+        this.rpmCurrentAction = null;
+        this.rpmCurrentActionName = null;
+      }
+      return false; 
+    }
+
+    if (!this.rpmActions[target]) {
+      if (target === "sprint" && this.rpmActions.dribble) target = "dribble";
+      else if (target === "dribble" && this.rpmActions.idle) target = "idle";
+    }
+
     if (!this.rpmActions[target]) return false;
 
-    this.playRpmAction(target, 0.1);
+    this.playRpmAction(target, 0.12);
     this.rpmCurrentAction?.setEffectiveTimeScale(timeScale);
     return true;
   }
 
-  applyRpmAnimations(dt, isMoving, sprinting, inputForward = 0) {
+  applyRpmAnimations(dt, isMoving, sprinting, inputForward = 0, hasBall = false) {
     if (!this.rpmAvatar) return;
-    if (this.updateRpmActionState(dt, isMoving, sprinting, inputForward)) {
+    if (this.updateRpmActionState(dt, isMoving, sprinting, inputForward, hasBall)) {
       this.applyRpmClipArmCorrection(dt, isMoving, sprinting, inputForward);
       return;
     }
@@ -1551,6 +1874,23 @@ export class Player {
     this.setRpmPose("leftLowerArm", -0.58 - Math.abs(arm) * 0.24, 0, -0.08, blend);
     this.setRpmPose("rightLowerArm", -0.58 - Math.abs(arm) * 0.24, 0, 0.08, blend);
     this.setRpmPose("chest", isMoving ? -0.06 : -0.02, 0, this.turnLean * 0.12, blend);
+  }
+
+  isBallInControlRange() {
+    const ball = window.game?.ball;
+    if (!ball || !ball.body) return false;
+    if (performance.now() - this.lastKickTime < 450) return false;
+    const pPos = this.mesh.position;
+    const bBody = ball.body;
+    const ballPos = this.tempBallPos.set(bBody.position.x, bBody.position.y, bBody.position.z);
+    
+    const dist = pPos.distanceTo(ballPos);
+    if (dist > 2.0 || ballPos.y > 1.5) return false;
+
+    // Check if ball is roughly in front or side, not behind
+    const facing = this.tempFacing.set(0, 0, 1).applyQuaternion(this.mesh.quaternion).setY(0);
+    const toBall = this.tempDriveDir.copy(ballPos).sub(pPos).setY(0).normalize();
+    return facing.dot(toBall) > -0.2;
   }
 
   bindInput() {
@@ -2510,7 +2850,7 @@ export class Player {
     }
 
     // 5. Apply Animations
-    this.applyAnimations(dt, actualMoving, sprinting, inputForward);
+    this.applyAnimations(dt, isMoving, sprinting, inputForward);
 
     // 6. Rotate Camera with Arrow Keys
     const camRotSpeed = 3.0; // speed of camera orbit
@@ -2527,7 +2867,7 @@ export class Player {
     this.onStamina?.(this.stamina / this.maxStamina);
 
     // Apply dribbling after movement/camera update
-    this.applyDribbling(dt, sprinting, actualMoving);
+    this.applyDribbling(dt, sprinting, isMoving);
   }
 
   triggerKick(style = "shot") {
@@ -2598,6 +2938,10 @@ export class Player {
       this.rpmMixer.stopAllAction();
       this.rpmCurrentAction = null;
       this.rpmCurrentActionName = null;
+    }
+    if (this.rpmAvatar && this.useDirectFbxClips && this.rpmActions?.idle) {
+      this.playRpmAction("idle", 0.05);
+      this.rpmCurrentAction?.setEffectiveTimeScale(0.8);
     }
     this.onChargeEnd?.();
   }
@@ -3253,6 +3597,16 @@ export class Player {
     this.mesh.rotation.x = THREE.MathUtils.lerp(this.mesh.rotation.x, p.rootPitch + p.rootSpinX, blend);
     this.mesh.rotation.z = THREE.MathUtils.lerp(this.mesh.rotation.z, p.rootRoll, blend);
 
+    if (this.useDirectFbxClips) {
+      this.rpmMixer?.update?.(dt);
+      if (this.rpmActions?.idle && this.rpmCurrentActionName !== "idle") {
+        this.playRpmAction("idle", 0.08);
+        this.rpmCurrentAction?.setEffectiveTimeScale(0.8);
+      }
+      this.rpmAvatar.position.y = p.bob;
+      return;
+    }
+
     this.setRpmPose("leftUpperArm", p.lAx, p.lAy - 0.04, p.lAz, blend);
     this.setRpmPose("rightUpperArm", p.rAx, p.rAy + 0.04, p.rAz, blend);
     this.setRpmPose("leftLowerArm", p.lForearmX, p.lForearmY, p.lForearmZ - 0.06, blend);
@@ -3294,7 +3648,8 @@ export class Player {
     else this.animStyle = "idle";
 
     if (this.rpmAvatar) {
-      this.applyRpmAnimations(dt, isMoving, sprinting, inputForward);
+      const hasBall = this.isBallInControlRange();
+      this.applyRpmAnimations(dt, isMoving, sprinting, inputForward, hasBall);
       return;
     }
     if (this.rpmOnly) return;
@@ -3586,6 +3941,15 @@ export class Player {
 
   applyDribbling(dt, sprinting, isMoving) {
     if (!window.game || !window.game.ball) return;
+    const game = window.game;
+    if (game?.mode === "room") {
+      const ownerId = game.ballOwnerId;
+      if (ownerId && ownerId !== game.myPlayerId) {
+        const lastSync = game.lastBallSyncAt || 0;
+        const timeout = game.ballOwnerTimeout || 350;
+        if (performance.now() - lastSync < timeout) return;
+      }
+    }
 
     // Skip only if a kick was just performed to allow separation
     if (performance.now() - this.lastKickTime < 450) return;

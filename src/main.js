@@ -1,6 +1,7 @@
 import * as THREE from "https://unpkg.com/three@0.165.0/build/three.module.js";
 import * as CANNON from "https://cdn.jsdelivr.net/npm/cannon-es@0.20.0/dist/cannon-es.js";
 import { FBXLoader } from "https://unpkg.com/three@0.165.0/examples/jsm/loaders/FBXLoader.js";
+import { SkeletonUtils } from "https://unpkg.com/three@0.165.0/examples/jsm/utils/SkeletonUtils.js";
 import { AcademyDirector } from "./AcademyDirector.js?v=20260308-1";
 import { Menu } from "./Menu.js?v=20260308-1";
 import { Physics } from "./Physics.js?v=20260306-3";
@@ -541,7 +542,51 @@ window.addEventListener("hashchange", handleRoute);
 // Handle initial route on load
 setTimeout(handleRoute, 100); 
 
-player.applyAvatar(menu.state?.avatar || {}, { showProceduralWhileLoading: true });
+const CUSTOM_PLAYER_ASSET = {
+  fbx: "/Oyuncu_yeni/Oyuncu_Yeni.fbx",
+  texture: "/Oyuncu_yeni/Deri.png",
+  // Model ve animasyonlar yan veya ters bakıyorsa bu değerleri değiştirin (-Math.PI / 2 veya Math.PI / 2 veya Math.PI)
+  rotationFix: { x: 0, y: 0, z: 0 },
+  animRotationFix: 0,
+};
+const BALL_OWNER_TIMEOUT_MS = 350;
+
+const ensureCustomPlayer = async () => {
+  player.setProceduralVisible(false);
+  const loaded = await player.loadCustomModel(
+    CUSTOM_PLAYER_ASSET.fbx,
+    CUSTOM_PLAYER_ASSET.texture,
+    {
+      rotationFix: CUSTOM_PLAYER_ASSET.rotationFix,
+      preferExternalAnims: true,
+      animRotationFix: CUSTOM_PLAYER_ASSET.animRotationFix,
+      useDirectFbxClips: true, // Kendi animasyon fbx'leri olduğu için retarget sorunlarını engeller
+    }
+  );
+  if (!loaded) {
+    player.setProceduralVisible(false);
+    console.warn("Custom FBX load failed. Procedural avatar remains hidden.");
+  }
+  if (loaded) {
+    refreshRemotePlayersAppearance();
+  }
+  return loaded;
+};
+
+// player.applyAvatar(menu.state?.avatar || {}, { showProceduralWhileLoading: true });
+player.setProceduralVisible(false);
+player.loadCustomModel(
+  CUSTOM_PLAYER_ASSET.fbx,
+  CUSTOM_PLAYER_ASSET.texture,
+  {
+    rotationFix: CUSTOM_PLAYER_ASSET.rotationFix,
+    preferExternalAnims: true,
+    animRotationFix: CUSTOM_PLAYER_ASSET.animRotationFix,
+    useDirectFbxClips: true,
+  }
+).then((loaded) => {
+  if (loaded) refreshRemotePlayersAppearance();
+});
 
 menu.onQualityChange = (profile) => {
   if (profile === "auto") {
@@ -555,6 +600,11 @@ menu.onQualityChange = (profile) => {
 
 // Debug exports
 window.game = { scene, camera, player, physics, ball, academy, skillDuel, THREE, CANNON };
+window.game.mode = "menu";
+window.game.ballOwnerId = null;
+window.game.myPlayerId = null;
+window.game.lastBallSyncAt = 0;
+window.game.ballOwnerTimeout = BALL_OWNER_TIMEOUT_MS;
 
 let mode = "menu";
 let remainingTime = 0;
@@ -596,6 +646,9 @@ let roomMatchDuration = 0;
 let localReady = false;
 let myPlayerId = null;
 let networkSendTimer = 0;
+let ballOwnerId = null;
+let lastBallSyncAt = 0;
+let remoteAnimClips = null;
 let localMatchSlot = {
   team: "blue",
   role: "field",
@@ -641,7 +694,68 @@ function normalizeKeeperSettings(settings = {}) {
   };
 }
 
+function getRemoteCustomModelClone() {
+  if (!player?.customModel) return null;
+  const clone = SkeletonUtils.clone(player.customModel);
+  clone.traverse((obj) => {
+    if (obj.isSkinnedMesh && obj.skeleton) obj.skeleton.pose();
+    if (obj.isMesh) {
+      obj.castShadow = true;
+      obj.receiveShadow = true;
+    }
+  });
+  const root = new THREE.Group();
+  root.add(clone);
+  root.userData.isCustomModel = true;
+  return root;
+}
+
+function cacheRemoteAnimClips() {
+  if (remoteAnimClips || !player?.rpmAnimReady || !player?.rpmActions) return;
+  const clips = {};
+  ["idle", "dribble", "sprint"].forEach((name) => {
+    const action = player.rpmActions?.[name];
+    if (action?.getClip) clips[name] = action.getClip();
+  });
+  if (Object.keys(clips).length === 0) return;
+  remoteAnimClips = clips;
+  refreshRemotePlayersAppearance(true);
+}
+
+function attachRemoteAnimations(remote) {
+  if (!remoteAnimClips || !remote?.mesh) return;
+  remote.animMixer = new THREE.AnimationMixer(remote.mesh);
+  remote.animActions = {};
+  Object.entries(remoteAnimClips).forEach(([name, clip]) => {
+    const action = remote.animMixer.clipAction(clip);
+    action.enabled = true;
+    action.setEffectiveWeight(name === "idle" ? 1 : 0);
+    action.play();
+    remote.animActions[name] = action;
+  });
+  remote.animState = "idle";
+}
+
+function refreshRemotePlayersAppearance(force = false) {
+  if (!player?.customModel) return;
+  for (const remote of remotePlayers.values()) {
+    if (!force && remote.mesh?.userData?.isCustomModel) continue;
+    const prev = remote.mesh;
+    const next = buildRemotePlayerMesh(remote.data || {});
+    next.position.copy(prev.position);
+    next.rotation.copy(prev.rotation);
+    next.userData.inited = true;
+    scene.remove(prev);
+    remote.mesh = next;
+    scene.add(next);
+    styleRemotePlayer(remote.mesh, remote.data || {});
+    if (remote.mesh.userData.isCustomModel) attachRemoteAnimations(remote);
+  }
+}
+
 function buildRemotePlayerMesh(playerData = {}) {
+  const custom = getRemoteCustomModelClone();
+  if (custom) return custom;
   const teamMeta = getTeamMeta(playerData.team);
   const isKeeper = playerData.role === "goalkeeper";
   const root = new THREE.Group();
@@ -720,6 +834,7 @@ function buildRemotePlayerMesh(playerData = {}) {
 }
 
 function styleRemotePlayer(mesh, playerData = {}) {
+  if (mesh?.userData?.isCustomModel) return;
   const materials = mesh?.userData?.materials;
   if (!materials) return;
   const teamMeta = getTeamMeta(playerData.team);
@@ -747,14 +862,20 @@ function upsertRemotePlayer(id, playerData = {}) {
       mesh,
       targetPos: new THREE.Vector3(),
       targetRot: 0,
+      velocity: new THREE.Vector3(),
+      data: {},
     };
     remotePlayers.set(id, remote);
+    if (remote.mesh.userData.isCustomModel) attachRemoteAnimations(remote);
   }
+  remote.data = { ...playerData };
   styleRemotePlayer(remote.mesh, playerData);
 
   const pos = playerData.position || { x: 0, y: 0, z: 0 };
   remote.targetPos.set(pos.x || 0, pos.y || 0, pos.z || 0);
   remote.targetRot = playerData.rotation || 0;
+  const vel = playerData.velocity || { x: 0, y: 0, z: 0 };
+  remote.velocity.set(vel.x || 0, vel.y || 0, vel.z || 0);
   if (!remote.mesh.userData.inited) {
     remote.mesh.position.copy(remote.targetPos);
     remote.mesh.rotation.y = remote.targetRot;
@@ -864,8 +985,11 @@ function deflectGoalkeeperBall() {
   ball.body.angularVelocity.set(0, 0, 0);
   goalCooldown = Math.max(goalCooldown, 0.15);
   lastBallTouch = { by: "local", at: performance.now() };
+  ballOwnerId = null;
+  lastBallSyncAt = performance.now();
   if (mode === "room" && socket?.connected) {
     socket.emit("ballKick", {
+      position: { x: ball.body.position.x, y: ball.body.position.y, z: ball.body.position.z },
       velocity: { x: ball.body.velocity.x, y: ball.body.velocity.y, z: ball.body.velocity.z },
       angularVelocity: { x: 0, y: 0, z: 0 },
     });
@@ -899,11 +1023,14 @@ function releaseGoalkeeperDistribution(charge) {
   goalkeeperState.holdingBall = false;
   goalkeeperState.holdTimer = 0;
   lastBallTouch = { by: "local", at: performance.now() };
+  ballOwnerId = null;
+  lastBallSyncAt = performance.now();
   ball.body.position.set(carryPoint.x, carryPoint.y, carryPoint.z);
   ball.body.velocity.set(forward.x * speed, lift, forward.z * speed);
   ball.body.angularVelocity.set(0, 0, 0);
   if (mode === "room" && socket?.connected) {
     socket.emit("ballKick", {
+      position: { x: ball.body.position.x, y: ball.body.position.y, z: ball.body.position.z },
       velocity: { x: ball.body.velocity.x, y: ball.body.velocity.y, z: ball.body.velocity.z },
       angularVelocity: { x: 0, y: 0, z: 0 },
     });
@@ -1256,7 +1383,7 @@ function loadKaleModel() {
         const centerZ = (box.min.z + box.max.z) * 0.5;
         goal.position.z += -centerZ;
         goal.position.y += -box.min.y;
-        const inwardOffset = 1.2;
+        const inwardOffset = 0;
         if (side === "left") {
           goal.position.x += -45 - box.max.x + inwardOffset;
         } else {
@@ -1473,6 +1600,8 @@ function resetBallToKickoff() {
   ball.body.position.set(0, 0.22, 0);
   ball.body.velocity.set(0, 0, 0);
   ball.body.angularVelocity.set(0, 0, 0);
+  ballOwnerId = null;
+  lastBallSyncAt = performance.now();
 }
 
 function callBallToFeet(syncNetwork = false) {
@@ -1480,6 +1609,8 @@ function callBallToFeet(syncNetwork = false) {
   ball.body.position.set(target.x, 0.22, target.z);
   ball.body.velocity.set(0, 0, 0);
   ball.body.angularVelocity.set(0, 0, 0);
+  ballOwnerId = null;
+  lastBallSyncAt = performance.now();
   if (syncNetwork && socket?.connected) {
     socket.emit("callBall", { x: target.x, y: 0.22, z: target.z });
   }
@@ -1511,6 +1642,15 @@ if (socket) {
     setRosterFromPayload(players);
     localReady = roomRoster.get(myPlayerId)?.ready || false;
     if (payload.readyStats) readyStats = payload.readyStats;
+    if (payload.ball) {
+      ball.body.position.set(payload.ball.x ?? 0, payload.ball.y ?? 0.22, payload.ball.z ?? 0);
+      ball.body.velocity.set(payload.ball.vx ?? 0, payload.ball.vy ?? 0, payload.ball.vz ?? 0);
+      ball.body.angularVelocity.set(0, 0, 0);
+      ball.mesh.position.copy(ball.body.position);
+      ball.mesh.quaternion.copy(ball.body.quaternion);
+    }
+    ballOwnerId = payload.ballOwner || null;
+    lastBallSyncAt = performance.now();
     Object.keys(players).forEach((id) => {
       if (id !== myPlayerId) upsertRemotePlayer(id, players[id]);
     });
@@ -1594,10 +1734,17 @@ if (socket) {
     ball.body.position.set(data.x || 0, data.y || 0.22, data.z || 0);
     ball.body.velocity.set(0, 0, 0);
     ball.body.angularVelocity.set(0, 0, 0);
+    ballOwnerId = null;
+    lastBallSyncAt = performance.now();
   });
 
   socket.on("ballSync", (ballDataSync) => {
-    if (isRoomHost || mode !== "room") return;
+    if (mode !== "room") return;
+    if (Object.prototype.hasOwnProperty.call(ballDataSync, "ownerId")) {
+      ballOwnerId = ballDataSync.ownerId;
+    }
+    lastBallSyncAt = performance.now();
+    if (ballOwnerId && ballOwnerId === myPlayerId) return;
     if (goalkeeperState.holdingBall) return;
     ball.body.position.set(ballDataSync.x, ballDataSync.y, ballDataSync.z);
     ball.body.velocity.set(ballDataSync.vx, ballDataSync.vy, ballDataSync.vz);
@@ -1606,6 +1753,11 @@ if (socket) {
   socket.on("ballKicked", (data) => {
     if (data.playerId === myPlayerId || mode !== "room") return;
     lastBallTouch = { by: "remote", at: performance.now() };
+    ballOwnerId = null;
+    lastBallSyncAt = performance.now();
+    if (data.position) {
+      ball.body.position.set(data.position.x, data.position.y, data.position.z);
+    }
     ball.body.velocity.set(data.velocity.x, data.velocity.y, data.velocity.z);
     if (data.angularVelocity) {
       ball.body.angularVelocity.set(
@@ -1629,7 +1781,7 @@ menu.onStartTraining = async (state) => {
 
   showStartLoading(true, "Lokal oyunçu yuklenir...");
   showCelebrationHint(false);
-  await player.applyAvatar(state.avatar, { showProceduralWhileLoading: false });
+  await ensureCustomPlayer();
   academy.stopSession();
   leaveRoomSession();
   player.mesh.position.set(0, 0, 2);
@@ -1652,7 +1804,7 @@ menu.onStartRoomMatch = async (state) => {
 
   showStartLoading(true, "Lokal oyunçu yuklenir...");
   showCelebrationHint(false);
-  await player.applyAvatar(state.avatar, { showProceduralWhileLoading: false });
+  await ensureCustomPlayer();
   academy.stopSession();
   player.mesh.position.set(0, 0, 2);
   resetBallToKickoff();
@@ -1703,7 +1855,7 @@ menu.onStartAcademy = async (state) => {
 
   showStartLoading(true, "Academy sessiyasi yuklenir...");
   showCelebrationHint(false);
-  await player.applyAvatar(state.avatar, { showProceduralWhileLoading: false });
+  await ensureCustomPlayer();
   leaveRoomSession();
   academy.startDrill(state.academyDrillId);
   resetScore();
@@ -1833,7 +1985,10 @@ player.onChargeRelease = (charge) => {
   }
 
   if (mode === "room" && socket?.connected) {
+    ballOwnerId = null;
+    lastBallSyncAt = performance.now();
     socket.emit("ballKick", {
+      position: { x: ball.body.position.x, y: ball.body.position.y, z: ball.body.position.z },
       velocity: { x: vx, y: vy, z: vz },
       angularVelocity: {
         x: ball.body.angularVelocity.x,
@@ -1887,7 +2042,10 @@ function attemptBicycleKick() {
   ball.body.angularVelocity.set(right.x * 7.2, player.spinInput * 2.8, right.z * 7.2);
 
   if (mode === "room" && socket?.connected) {
+    ballOwnerId = null;
+    lastBallSyncAt = performance.now();
     socket.emit("ballKick", {
+      position: { x: ball.body.position.x, y: ball.body.position.y, z: ball.body.position.z },
       velocity: {
         x: ball.body.velocity.x,
         y: ball.body.velocity.y,
@@ -1986,6 +2144,14 @@ function animate() {
   const elapsed = clock.elapsedTime;
   performanceDirector.beginFrame();
 
+  cacheRemoteAnimClips();
+  if (window.game) {
+    window.game.mode = mode;
+    window.game.ballOwnerId = ballOwnerId;
+    window.game.myPlayerId = myPlayerId;
+    window.game.lastBallSyncAt = lastBallSyncAt;
+  }
+
   physics.updateVisuals?.(dt, elapsed);
 
   if (mode === "training" || mode === "room" || mode === "academy") {
@@ -2029,11 +2195,32 @@ function animate() {
       remote.mesh.position.lerp(remote.targetPos, Math.min(1, dt * 12));
       const rotDiff = remote.targetRot - remote.mesh.rotation.y;
       remote.mesh.rotation.y += rotDiff * Math.min(1, dt * 12);
+      if (!remote.animMixer && remote.mesh.userData.isCustomModel) attachRemoteAnimations(remote);
+      if (remote.animMixer && remote.animActions) {
+        const speed = remote.velocity ? remote.velocity.length() : 0;
+        const moving = speed > 0.25;
+        const sprinting = speed > 13.0;
+        let target = "idle";
+        if (moving && remote.animActions.dribble) target = "dribble";
+        if (sprinting && remote.animActions.sprint) target = "sprint";
+        if (target !== remote.animState) {
+          const prev = remote.animActions[remote.animState];
+          const next = remote.animActions[target];
+          if (next) {
+            next.reset();
+            next.fadeIn(0.15);
+            next.play();
+          }
+          if (prev) prev.fadeOut(0.15);
+          remote.animState = target;
+        }
+        remote.animMixer.update(dt);
+      }
     }
 
     if (mode === "room") {
       networkSendTimer += dt;
-      if (socket?.connected && networkSendTimer >= 0.05) {
+      if (socket?.connected && networkSendTimer >= 0.033) {
         networkSendTimer = 0;
         socket.emit("playerUpdate", {
           position: {
@@ -2052,11 +2239,18 @@ function animate() {
           animState: {},
         });
 
-        const localBallAuthority = isRoomHost ||
-          goalkeeperState.holdingBall ||
+        const now = performance.now();
+        const ownerStale = !ballOwnerId || now - lastBallSyncAt > BALL_OWNER_TIMEOUT_MS;
+        const hasRemoteOwner = ballOwnerId && ballOwnerId !== myPlayerId;
+        const holdingBall = goalkeeperState.holdingBall;
+        const localBallAuthority = holdingBall ||
           player.mesh.position.distanceTo(ball.mesh.position) < 2.6 ||
-          (lastBallTouch.by === "local" && performance.now() - lastBallTouch.at < 900);
-        if (localBallAuthority) {
+          (lastBallTouch.by === "local" && now - lastBallTouch.at < 900);
+        if (localBallAuthority && (holdingBall || !hasRemoteOwner || ownerStale)) {
+          if (!ballOwnerId || ownerStale || holdingBall) {
+            ballOwnerId = myPlayerId;
+            lastBallSyncAt = now;
+          }
           socket.emit("ballUpdate", {
             x: ball.body.position.x,
             y: ball.body.position.y,

@@ -67,10 +67,11 @@ export class Physics {
     };
 
     // Strict Arena Boundaries (Increased height to 50m)
-    createWall(46, 0, 1, 50, 31);   // Right
-    createWall(-46, 0, 1, 50, 31);  // Left
-    createWall(0, 31, 46, 50, 1);   // Front
-    createWall(0, -31, 46, 50, 1);  // Back
+    // Pushed back slightly (±48) to allow ball to enter the goal net
+    createWall(48, 0, 1, 50, 31);   // Right
+    createWall(-48, 0, 1, 50, 31);  // Left
+    createWall(0, 31, 48, 50, 1);   // Front
+    createWall(0, -31, 48, 50, 1);  // Back
 
     // Physical Goal Posts to allow bouncing (approximate positions)
     const postRadius = 0.1;
@@ -367,6 +368,8 @@ export class Physics {
         });
         this.adBoardTextures.push(boardTex);
 
+        if (rotY === Math.PI / 2 && Math.abs(i) <= 1) continue;
+
         const board = new THREE.Mesh(new THREE.BoxGeometry(width, 1.1, 0.3), boardMat);
         if (rotY === 0) {
           board.position.set(i * (width + 0.35), 0.6, z);
@@ -380,8 +383,9 @@ export class Physics {
     };
     addBoardLine(halfHeight - 0.9, 9.6, 0);
     addBoardLine(-halfHeight + 0.9, 9.6, 0);
-    addBoardLine(halfField - 0.9, 6.2, Math.PI / 2);
-    addBoardLine(-halfField + 0.9, 6.2, Math.PI / 2);
+    // End boards pushed back slightly more to clear goal area
+    addBoardLine(halfField + 2.5, 6.2, Math.PI / 2);
+    addBoardLine(-halfField - 2.5, 6.2, Math.PI / 2);
 
     // Corner flags
     const flagPoleMat = new THREE.MeshStandardMaterial({ color: 0xe6edf7, roughness: 0.55, metalness: 0.35 });
@@ -504,14 +508,14 @@ export class Physics {
 
     createStand(0, 35, 100, 10);
     createStand(0, -35, 100, 10, Math.PI);
-    createStand(50, 0, 70, 10, -Math.PI / 2);
-    createStand(-50, 0, 70, 10, Math.PI / 2);
+    createStand(55, 0, 70, 10, -Math.PI / 2);
+    createStand(-55, 0, 70, 10, Math.PI / 2);
 
     const crowdBlocks = [
       { x: 0, z: 35.5, w: 96, h: 0.55, d: 1.2, c: 0xf2b705 },
       { x: 0, z: -35.5, w: 96, h: 0.55, d: 1.2, c: 0x2ea2ff },
-      { x: 50.5, z: 0, w: 66, h: 0.55, d: 1.2, c: 0xf2b705, ry: -Math.PI / 2 },
-      { x: -50.5, z: 0, w: 66, h: 0.55, d: 1.2, c: 0x2ea2ff, ry: Math.PI / 2 },
+      { x: 55.5, z: 0, w: 66, h: 0.55, d: 1.2, c: 0xf2b705, ry: -Math.PI / 2 },
+      { x: -55.5, z: 0, w: 66, h: 0.55, d: 1.2, c: 0x2ea2ff, ry: Math.PI / 2 },
     ];
     crowdBlocks.forEach((b) => {
       const crowdMat = new THREE.MeshStandardMaterial({
@@ -550,10 +554,10 @@ export class Physics {
       head.castShadow = true;
       this.scene.add(head);
     };
-    createLight(48, 33);
-    createLight(-48, 33);
-    createLight(48, -33);
-    createLight(-48, -33);
+    createLight(53, 33);
+    createLight(-53, 33);
+    createLight(53, -33);
+    createLight(-53, -33);
 
     // Scoreboards
     const addScoreboard = (x, z, rotY) => {
@@ -1109,8 +1113,8 @@ export class Physics {
     }
 
     // Strict Pitch Boundaries Clamping (90x60 -> ±45, ±30)
-    // We allow a small margin (0.5m) so it doesn't clip through visual walls
-    const limitX = 45.5;
+    // We allow more space on X (47.5) so the ball can go into the net depth
+    const limitX = 47.5;
     const limitZ = 30.5;
 
     if (Math.abs(body.position.x) > limitX) {

@@ -13,6 +13,7 @@ const PORT = process.env.PORT || 5000;
 const TEAM_KEYS = ["blue", "red"];
 const MATCH_TIME_OPTIONS = [3, 5, 10, 15];
 const rooms = {};
+const BALL_OWNER_TIMEOUT_MS = 350;
 
 express.static.mime.define({
     "application/javascript": ["js"],
@@ -123,6 +124,13 @@ function broadcastReadyStats(code, room) {
     io.to(code).emit("readyStats", getReadyStats(room));
 }
 
+function canAcceptBallUpdate(room, socketId, now) {
+    if (!room.ballOwner) return true;
+    if (room.ballOwner === socketId) return true;
+    const lastAt = room.ballOwnerAt || 0;
+    return now - lastAt > BALL_OWNER_TIMEOUT_MS;
+}
+
 function scheduleMatchEnd(code, room) {
     if (room.match?.timer) clearTimeout(room.match.timer);
     const durationMs = (room.match?.matchTime || room.settings.matchTime || 10) * 60 * 1000;
@@ -185,6 +193,8 @@ io.on("connection", (socket) => {
             settings,
             password: String(data.password || "").trim(),
             ball: { x: 0, y: 0.225, z: 0, vx: 0, vy: 0, vz: 0 },
+            ballOwner: null,
+            ballOwnerAt: 0,
             match: { state: "lobby", startedAt: null, matchTime: settings.matchTime, timer: null },
         };
 
@@ -200,6 +210,8 @@ io.on("connection", (socket) => {
             players: rooms[code].players,
             settings: rooms[code].settings,
             match: buildMatchPayload(rooms[code]),
+            ball: rooms[code].ball,
+            ballOwner: rooms[code].ballOwner,
             readyStats: getReadyStats(rooms[code]),
         });
 
@@ -261,6 +273,8 @@ io.on("connection", (socket) => {
             players: room.players,
             settings: room.settings,
             match: buildMatchPayload(room),
+            ball: room.ball,
+            ballOwner: room.ballOwner,
             readyStats: getReadyStats(room),
         });
 
@@ -299,6 +313,8 @@ io.on("connection", (socket) => {
     socket.on("ballUpdate", (data = {}) => {
         if (!currentRoom || !rooms[currentRoom]) return;
         const room = rooms[currentRoom];
+        const now = Date.now();
+        if (!canAcceptBallUpdate(room, socket.id, now)) return;
         room.ball = {
             x: data.x ?? room.ball.x,
             y: data.y ?? room.ball.y,
@@ -307,13 +323,42 @@ io.on("connection", (socket) => {
             vy: data.vy ?? room.ball.vy,
             vz: data.vz ?? room.ball.vz,
         };
-        socket.to(currentRoom).emit("ballSync", room.ball);
+        const player = room.players[socket.id];
+        let ownerId = socket.id;
+        if (player?.position) {
+            const dx = (player.position.x || 0) - room.ball.x;
+            const dz = (player.position.z || 0) - room.ball.z;
+            const distSq = dx * dx + dz * dz;
+            const closeControl = distSq <= 3.2 * 3.2 && room.ball.y <= 1.4;
+            ownerId = closeControl ? socket.id : null;
+        }
+        room.ballOwner = ownerId;
+        room.ballOwnerAt = now;
+        socket.to(currentRoom).emit("ballSync", {
+            ...room.ball,
+            ownerId: room.ballOwner,
+            ts: now,
+        });
     });
 
     socket.on("ballKick", (data = {}) => {
         if (!currentRoom || !rooms[currentRoom]) return;
+        const room = rooms[currentRoom];
+        const now = Date.now();
+        const pos = data.position || {};
+        room.ball = {
+            x: Number.isFinite(pos.x) ? pos.x : room.ball.x,
+            y: Number.isFinite(pos.y) ? pos.y : room.ball.y,
+            z: Number.isFinite(pos.z) ? pos.z : room.ball.z,
+            vx: data.velocity?.x ?? room.ball.vx,
+            vy: data.velocity?.y ?? room.ball.vy,
+            vz: data.velocity?.z ?? room.ball.vz,
+        };
+        room.ballOwner = null;
+        room.ballOwnerAt = now;
         io.to(currentRoom).emit("ballKicked", {
             playerId: socket.id,
+            position: { x: room.ball.x, y: room.ball.y, z: room.ball.z },
             velocity: data.velocity,
             angularVelocity: data.angularVelocity,
         });
@@ -373,11 +418,13 @@ io.on("connection", (socket) => {
         if (!currentRoom || !rooms[currentRoom]) return;
         const room = rooms[currentRoom];
         if (room.match?.state === "live") return;
-        io.to(currentRoom).emit("ballCalled", {
-            x: Number(data.x) || 0,
-            y: Number(data.y) || 0.22,
-            z: Number(data.z) || 0,
-        });
+        const x = Number(data.x) || 0;
+        const y = Number(data.y) || 0.22;
+        const z = Number(data.z) || 0;
+        room.ball = { x, y, z, vx: 0, vy: 0, vz: 0 };
+        room.ballOwner = null;
+        room.ballOwnerAt = Date.now();
+        io.to(currentRoom).emit("ballCalled", { x, y, z });
     });
 
     socket.on("startMatch", () => {
@@ -428,6 +475,10 @@ io.on("connection", (socket) => {
         if (!currentRoom || !rooms[currentRoom]) return;
 
         const room = rooms[currentRoom];
+        if (room.ballOwner === socket.id) {
+            room.ballOwner = null;
+            room.ballOwnerAt = Date.now();
+        }
         delete room.players[socket.id];
         socket.to(currentRoom).emit("playerLeft", { id: socket.id });
         broadcastReadyStats(currentRoom, room);

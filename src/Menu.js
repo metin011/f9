@@ -30,6 +30,7 @@ const KIT_OPTIONS = [
   { id: "Carbon Volt", label: "Carbon Volt", note: "Koyu karbon, lime ve qrafit tarazi.", colors: ["#171a21", "#9dff30", "#e2f8bf"] },
   { id: "Sunset Coral", label: "Sunset Coral", note: "Isti coral ve krem balansli set.", colors: ["#ff765f", "#ffb48f", "#fff6e8"] },
   { id: "Atlas White", label: "Atlas White", note: "Temiz ag baza, qizili ve gumus bitis.", colors: ["#f7f8fc", "#d6dbe6", "#c7a252"] },
+  { id: "Rematch", label: "Rematch", note: "Portagal/Qirmizi parlaq neon enerjisi.", colors: ["#ff4500", "#ff5e1a", "#ffffff"] },
 ];
 
 const BOOT_OPTIONS = [
@@ -45,6 +46,7 @@ const BOOT_OPTIONS = [
   { id: "Ocean Mint", label: "Ocean Mint", note: "Mavi-yasil qarisiq futuristik set.", colors: ["#56efd0", "#126264"] },
   { id: "Rose Chrome", label: "Rose Chrome", note: "Metal cəhrayi vurgulu bot.", colors: ["#ff8fb0", "#7f3651"] },
   { id: "Pure White", label: "Pure White", note: "Tam ag, temiz ve sade.", colors: ["#ffffff", "#bfc7d1"] },
+  { id: "Rematch Elite", label: "Rematch Elite", note: "Rematch seriyasinin ozel butsu.", colors: ["#ff5e1a", "#ffffff", "#111111"] },
 ];
 
 const HAIR_OPTIONS = [
