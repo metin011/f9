@@ -1,7 +1,7 @@
-import * as THREE from "https://unpkg.com/three@0.165.0/build/three.module.js";
+﻿import * as THREE from "https://unpkg.com/three@0.165.0/build/three.module.js";
 import * as CANNON from "https://cdn.jsdelivr.net/npm/cannon-es@0.20.0/dist/cannon-es.js";
 import { FBXLoader } from "https://unpkg.com/three@0.165.0/examples/jsm/loaders/FBXLoader.js";
-import { SkeletonUtils } from "https://unpkg.com/three@0.165.0/examples/jsm/utils/SkeletonUtils.js";
+import * as SkeletonUtils from "https://unpkg.com/three@0.165.0/examples/jsm/utils/SkeletonUtils.js";
 import { AcademyDirector } from "./AcademyDirector.js?v=20260308-1";
 import { Menu } from "./Menu.js?v=20260308-1";
 import { Physics } from "./Physics.js?v=20260306-3";
@@ -282,17 +282,17 @@ const QUALITY_PROFILES = {
     rim: 0.42,
   },
   medium: {
-    pixelRatio: Math.min(window.devicePixelRatio || 1, 1.08),
-    shadowMapSize: 1024,
+    pixelRatio: Math.min(window.devicePixelRatio || 1, 0.95),
+    shadowMapSize: 768,
     shadowType: THREE.PCFShadowMap,
-    shadowEvery: 3,
-    exposure: 0.64,
-    fogFar: 170,
-    environmentIntensity: 0.28,
-    hemi: 0.82,
-    sun: 1.42,
-    bounce: 0.18,
-    rim: 0.3,
+    shadowEvery: 4,
+    exposure: 0.62,
+    fogFar: 165,
+    environmentIntensity: 0.24,
+    hemi: 0.78,
+    sun: 1.28,
+    bounce: 0.16,
+    rim: 0.26,
   },
 };
 const QUALITY_ORDER = ["medium", "high", "ultra"];
@@ -317,9 +317,9 @@ class PerformanceDirector {
   detectInitialProfile() {
     const dpr = window.devicePixelRatio || 1;
     const cores = navigator.hardwareConcurrency || 4;
-    if (cores >= 8 && dpr <= 1.8) return "ultra";
-    if (cores <= 4 || dpr >= 2.2) return "medium";
-    return "high";
+    if (cores >= 10 && dpr <= 1.6) return "ultra";
+    if (cores >= 6 && dpr <= 1.9) return "high";
+    return "medium";
   }
 
   applyProfile(name) {
@@ -543,8 +543,8 @@ window.addEventListener("hashchange", handleRoute);
 setTimeout(handleRoute, 100); 
 
 const CUSTOM_PLAYER_ASSET = {
-  fbx: "/Oyuncu_yeni/Oyuncu_Yeni.fbx",
-  texture: "/Oyuncu_yeni/Deri.png",
+  fbx: "/Oyuncu ve Animasyonları/Oyuncunun görünümü.fbx",
+  texture: "/Oyuncu ve Animasyonları/Oyuncunun görünümünün derisi.png",
   // Model ve animasyonlar yan veya ters bakıyorsa bu değerleri değiştirin (-Math.PI / 2 veya Math.PI / 2 veya Math.PI)
   rotationFix: { x: 0, y: 0, z: 0 },
   animRotationFix: 0,
@@ -552,40 +552,46 @@ const CUSTOM_PLAYER_ASSET = {
 const BALL_OWNER_TIMEOUT_MS = 350;
 
 const ensureCustomPlayer = async () => {
-  player.setProceduralVisible(false);
+  player.setProceduralVisible(true);
   const loaded = await player.loadCustomModel(
     CUSTOM_PLAYER_ASSET.fbx,
     CUSTOM_PLAYER_ASSET.texture,
     {
       rotationFix: CUSTOM_PLAYER_ASSET.rotationFix,
-      preferExternalAnims: true,
+      preferExternalAnims: false,
       animRotationFix: CUSTOM_PLAYER_ASSET.animRotationFix,
-      useDirectFbxClips: true, // Kendi animasyon fbx'leri olduğu için retarget sorunlarını engeller
+      useDirectFbxClips: false,
     }
   );
   if (!loaded) {
-    player.setProceduralVisible(false);
-    console.warn("Custom FBX load failed. Procedural avatar remains hidden.");
+    player.setProceduralVisible(true);
+    console.warn("Custom FBX load failed. Procedural avatar shown as fallback.");
   }
   if (loaded) {
+    player.setProceduralVisible(false);
     refreshRemotePlayersAppearance();
   }
   return loaded;
 };
 
 // player.applyAvatar(menu.state?.avatar || {}, { showProceduralWhileLoading: true });
-player.setProceduralVisible(false);
+player.setProceduralVisible(true);
 player.loadCustomModel(
   CUSTOM_PLAYER_ASSET.fbx,
   CUSTOM_PLAYER_ASSET.texture,
   {
     rotationFix: CUSTOM_PLAYER_ASSET.rotationFix,
-    preferExternalAnims: true,
+    preferExternalAnims: false,
     animRotationFix: CUSTOM_PLAYER_ASSET.animRotationFix,
-    useDirectFbxClips: true,
+    useDirectFbxClips: false,
   }
 ).then((loaded) => {
-  if (loaded) refreshRemotePlayersAppearance();
+  if (loaded) {
+    player.setProceduralVisible(false);
+    refreshRemotePlayersAppearance();
+  } else {
+    player.setProceduralVisible(true);
+  }
 });
 
 menu.onQualityChange = (profile) => {
@@ -1924,7 +1930,9 @@ player.onChargeRelease = (charge) => {
     return;
   }
   lastBallTouch = { by: "local", at: performance.now() };
-  player.triggerKick();
+  if (charge.type === "KeyQ") player.triggerKick("pass", "longPass");
+  else if (charge.type === "KeyE") player.triggerKick("pass", "shortPass");
+  else player.triggerKick("shot", "shot");
   const p = Math.min(1, charge.hold / 1.3);
   // REMATCH Style: shoot where the camera is looking
   const forward = player.getAimDir();
@@ -2305,5 +2313,6 @@ document.addEventListener("visibilitychange", () => {
   clock.getDelta();
   performanceDirector.noteResume();
 });
+
 
 

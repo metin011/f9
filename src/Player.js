@@ -1,4 +1,4 @@
-import * as THREE from "https://unpkg.com/three@0.165.0/build/three.module.js";
+﻿import * as THREE from "https://unpkg.com/three@0.165.0/build/three.module.js";
 import { GLTFLoader } from "https://unpkg.com/three@0.165.0/examples/jsm/loaders/GLTFLoader.js";
 import { FBXLoader } from "https://unpkg.com/three@0.165.0/examples/jsm/loaders/FBXLoader.js";
 import * as SkeletonUtils from "https://unpkg.com/three@0.165.0/examples/jsm/utils/SkeletonUtils.js";
@@ -76,10 +76,11 @@ const BOOT_PRESETS = {
   "Rematch Elite": 0xff5e1a,
 };
 
+const CUSTOM_PLAYER_DIR = "/Oyuncu ve Animasyonları";
 const CUSTOM_PLAYER_ANIMS = {
-  idle: "/Oyuncu_yeni/Normal%20y%C3%BCr%C3%BCme.fbx",
-  dribble: "/Oyuncu_yeni/Dribling.fbx",
-  sprint: "/Oyuncu_yeni/Shift%20bas%C4%B1l%C4%B1yken%20ko%C5%9Fma.fbx",
+  idle: `${CUSTOM_PLAYER_DIR}/Normal  topsuz yürüme.fbx`,
+  dribble: `${CUSTOM_PLAYER_DIR}/top sürerken dribling.fbx`,
+  sprint: `${CUSTOM_PLAYER_DIR}/Shift basılıyken koşma.fbx`,
 };
 
 const RPM_ANIM_SOURCES = {
@@ -160,6 +161,7 @@ export class Player {
     this.runTime = 0;
     this.kickAnim = 0;
     this.kickStyle = "shot";
+    this.kickVariant = "shot";
     this.lastKickTime = 0; // Prevent immediate re-pick after shot
     this.turnLean = 0;
     this.dribbleBlend = 0;
@@ -1323,8 +1325,10 @@ export class Player {
                     map: tex,
                     color: 0xffffff,
                     roughness: 0.65,
-                    metalness: 0.05
+                    metalness: 0.05,
+                    skinning: !!child.isSkinnedMesh,
                   });
+                  child.material.needsUpdate = true;
                 }
                 child.castShadow = true;
                 child.receiveShadow = true;
@@ -1365,7 +1369,7 @@ export class Player {
             this.resetBoneRotations(fbx);
             this.rpmAnimYawOffset = options.animRotationFix ?? 0;
             this.rpmAnimYawHipsName = this.rpmRig?.hips?.name || "Hips";
-            this.useDirectFbxClips = useDirectFbxClips;
+            this.useDirectFbxClips = false;
 
             // Priority to external animations (Normal walking, Dribbling, etc.)
             // as internal fbx.animations might just be a static pose (T-Pose)
@@ -1607,67 +1611,13 @@ export class Player {
   }
 
   async loadRpmFbxAnimations(targetModel) {
-    const token = ++this.rpmAnimToken;
-    const entries = Object.entries(RPM_ANIM_SOURCES);
-    this.rpmAnimReady = false;
-
-    this.rpmMixer = new THREE.AnimationMixer(targetModel);
+    this.rpmAnimToken += 1;
+    if (this.rpmAvatar !== targetModel) return;
+    this.rpmMixer = null;
     this.rpmActions = {};
     this.rpmCurrentAction = null;
     this.rpmCurrentActionName = null;
-
-    for (const [name, path] of entries) {
-      try {
-        let fbx;
-        try {
-          fbx = await this.loadFbxAsset(path);
-        } catch (err) {
-          // If a skill or celebration animation is missing, try a fallback
-          if (RPM_SKILL_ACTIONS.has(name) || name.includes("celebration")) {
-            const fallbackPath = name === "kickShot" || name === "kickBicycle" ? RPM_ANIM_SOURCES.kickShot : RPM_ANIM_SOURCES.dribble;
-            fbx = await this.loadFbxAsset(fallbackPath);
-          } else {
-            throw err;
-          }
-        }
-        
-        const sourceClip = fbx.animations?.[0];
-        if (!sourceClip) continue;
-
-        let clipToUse = null;
-        if (this.useDirectFbxClips) {
-          clipToUse = this.normalizeClipTrackNames(sourceClip);
-        } else {
-          const retargeted = SkeletonUtils.retargetClip(targetModel, fbx, sourceClip, {
-            useFirstFramePosition: name !== "idle",
-          });
-          if (!retargeted) continue;
-          clipToUse = retargeted;
-        }
-        if (!clipToUse) continue;
-        this.applyClipYawOffset(clipToUse, this.rpmAnimYawOffset, this.rpmAnimYawHipsName);
-
-        const action = this.rpmMixer.clipAction(clipToUse);
-        action.enabled = true;
-        action.clampWhenFinished = RPM_ONE_SHOT_ACTIONS.has(name);
-        action.loop = RPM_ONE_SHOT_ACTIONS.has(name) ? THREE.LoopOnce : THREE.LoopRepeat;
-        action.setEffectiveWeight(1);
-        action.setEffectiveTimeScale(name === "sprint" ? 1.35 : 1.0);
-        this.rpmActions[name] = action;
-      } catch (_) {
-        if (RPM_SKILL_ACTIONS.has(name) && !RPM_MISSING_CLIP_LOGS.has(path)) {
-          RPM_MISSING_CLIP_LOGS.add(path);
-          console.info(`[SkillClipFallback] Missing RPM skill clip: ${path}`);
-        }
-      }
-    }
-
-    if (token !== this.rpmAnimToken || this.rpmAvatar !== targetModel) return;
-    this.rpmAnimReady = Object.keys(this.rpmActions).length > 0;
-    if (this.rpmAnimReady) {
-      this.playRpmAction("idle", 0.01);
-      this.rpmCurrentAction?.setEffectiveTimeScale(0.0);
-    }
+    this.rpmAnimReady = false;
   }
 
   playRpmAction(name, fade = 0.14) {
@@ -1724,15 +1674,17 @@ export class Player {
       timeScale = 1.0;
     }
 
-    // Force "old" (procedural) movement animations if they are in basic states
-    // This satisfies the request: "eski koşma şut felan animasyonlarını buna ekle"
+    // Use direct FBX locomotion when available; otherwise fall back to procedural.
     if (target === "idle" || target === "dribble" || target === "sprint") {
-      if (this.rpmCurrentAction) {
-        this.rpmCurrentAction.fadeOut(0.2);
-        this.rpmCurrentAction = null;
-        this.rpmCurrentActionName = null;
+      const hasDirect = this.useDirectFbxClips && this.rpmActions[target];
+      if (!hasDirect) {
+        if (this.rpmCurrentAction) {
+          this.rpmCurrentAction.fadeOut(0.2);
+          this.rpmCurrentAction = null;
+          this.rpmCurrentActionName = null;
+        }
+        return false;
       }
-      return false; 
     }
 
     if (!this.rpmActions[target]) {
@@ -1749,30 +1701,21 @@ export class Player {
 
   applyRpmAnimations(dt, isMoving, sprinting, inputForward = 0, hasBall = false) {
     if (!this.rpmAvatar) return;
-    if (this.updateRpmActionState(dt, isMoving, sprinting, inputForward, hasBall)) {
-      this.applyRpmClipArmCorrection(dt, isMoving, sprinting, inputForward);
-      return;
-    }
-
     const blend = THREE.MathUtils.clamp(dt * 10, 0.08, 0.45);
-    const movingBack = isMoving && inputForward < -0.15;
-    const speedFactor = sprinting ? 12.5 : (movingBack ? 7.2 : 8.8);
-    this.runTime += dt * (isMoving ? speedFactor : 2.2);
+    const actualSpeed = this.velocity.length();
+    const locomotionActive = isMoving && actualSpeed > 0.12;
+    const movingBack = locomotionActive && inputForward < -0.15;
+    const speedFactor = locomotionActive
+      ? (sprinting ? 13.2 : movingBack ? 6.1 : hasBall ? 9.0 : 7.6)
+      : 1.9;
+    this.runTime += dt * speedFactor;
 
     let kickPhase = 0;
     if (this.kickAnim > 0) {
-      this.kickAnim = Math.max(0, this.kickAnim - dt * 4);
+      const decay = this.kickStyle === "bicycle" ? 4.5 : this.kickStyle === "pass" ? 5.1 : 4.2;
+      this.kickAnim = Math.max(0, this.kickAnim - dt * decay);
       kickPhase = 1 - this.kickAnim;
     }
-
-    const run = Math.sin(this.runTime);
-    const side = Math.sin(this.runTime * 0.5);
-    const stride = THREE.MathUtils.clamp(this.velocity.length() / this.sprintSpeed, 0, 1);
-    const dribblePulse = Math.sin(this.runTime * 2.0) * this.dribbleBlend * 0.6;
-    const legAmp = (sprinting ? 0.7 : (movingBack ? 0.38 : 0.5)) * (0.55 + stride * 0.65);
-    const legPitch = run * legAmp * (movingBack ? -1 : 1);
-    const armPitch = -legPitch * 0.75;
-    const bob = Math.abs(Math.sin(this.runTime * 2)) * (0.015 + stride * 0.012);
 
     if (this.slideState.active) {
       const phase = clamp01(this.slideState.time / Math.max(0.0001, this.slideState.duration));
@@ -1816,53 +1759,118 @@ export class Player {
     }
 
     if (this.kickAnim > 0) {
-      const scissor = Math.sin(kickPhase * Math.PI);
-      this.setRpmPose("rightUpperLeg", -scissor * 0.95, 0, 0.08, blend);
-      this.setRpmPose("leftUpperLeg", scissor * 0.35, 0, -0.05, blend);
-      this.setRpmPose("rightLowerLeg", scissor * 0.35, 0, 0, blend);
-      this.setRpmPose("leftLowerLeg", -scissor * 0.16, 0, 0, blend);
-      this.setRpmPose("chest", -0.14, scissor * 0.12, this.turnLean * 0.2, blend);
-      this.setRpmPose("head", 0, -scissor * 0.05, -this.turnLean * 0.12, blend);
-      this.setRpmPose("rightUpperArm", -0.32, 0, 0.12, blend);
-      this.setRpmPose("leftUpperArm", 0.22, 0, -0.12, blend);
-    } else if (isMoving) {
-      this.setRpmPose("leftUpperLeg", -legPitch + Math.max(0, -dribblePulse) * 0.12, 0, -side * 0.05, blend);
-      this.setRpmPose("rightUpperLeg", legPitch + Math.max(0, dribblePulse) * 0.12, 0, side * 0.05, blend);
-      this.setRpmPose("leftLowerLeg", Math.abs(legPitch) * 0.26, 0, 0, blend);
-      this.setRpmPose("rightLowerLeg", Math.abs(-legPitch) * 0.26, 0, 0, blend);
-      this.setRpmPose("leftFoot", -Math.max(0, legPitch) * 0.2, 0, 0, blend);
-      this.setRpmPose("rightFoot", -Math.max(0, -legPitch) * 0.2, 0, 0, blend);
-
-      this.setRpmPose("leftUpperArm", armPitch, -0.04 - side * 0.02, -0.12, blend);
-      this.setRpmPose("rightUpperArm", -armPitch, 0.04 + side * 0.02, 0.12, blend);
-      this.setRpmPose("leftLowerArm", -armPitch * 0.26, 0, 0, blend);
-      this.setRpmPose("rightLowerArm", armPitch * 0.26, 0, 0, blend);
-
-      const backLean = movingBack ? 0.05 : 0;
-      const sprintLean = sprinting ? -0.11 : -0.05;
-      this.setRpmPose("hips", 0, 0, this.turnLean * 0.12, blend);
-      this.setRpmPose("spine", sprintLean + backLean, 0, this.turnLean * 0.18, blend);
-      this.setRpmPose("chest", sprintLean * 0.6 + backLean * 0.45, 0, this.turnLean * 0.22, blend);
-      this.setRpmPose("head", 0, Math.sin(this.runTime * 0.45) * 0.03, -this.turnLean * 0.1, blend);
-    } else {
-      const breath = Math.sin(this.runTime) * 0.02;
-      this.setRpmPose("leftUpperLeg", 0, 0, 0, blend * 0.45);
-      this.setRpmPose("rightUpperLeg", 0, 0, 0, blend * 0.45);
-      this.setRpmPose("leftLowerLeg", 0, 0, 0, blend * 0.45);
-      this.setRpmPose("rightLowerLeg", 0, 0, 0, blend * 0.45);
-      this.setRpmPose("leftUpperArm", breath * 0.4, -0.03, -0.08, blend * 0.5);
-      this.setRpmPose("rightUpperArm", -breath * 0.4, 0.03, 0.08, blend * 0.5);
-      this.setRpmPose("spine", breath * 0.12, 0, 0, blend * 0.5);
-      this.setRpmPose("chest", breath * 0.18, 0, 0, blend * 0.5);
-      this.setRpmPose("head", 0, Math.sin(this.runTime * 0.42) * 0.02, 0, blend * 0.45);
+      const windup = smoothstep(0, 0.34, kickPhase);
+      const strike = smoothstep(0.34, 0.82, kickPhase);
+      const follow = smoothstep(0.82, 1, kickPhase);
+      const isShortPass = this.kickVariant === "shortPass";
+      const isLongPass = this.kickVariant === "longPass";
+      const torsoLean = isShortPass ? -0.08 : isLongPass ? -0.2 : -0.16;
+      const torsoTwist = isShortPass ? -0.1 : isLongPass ? -0.36 : -0.24;
+      const supportLegX = isShortPass ? 0.12 : 0.18 + follow * 0.1;
+      const kickLegStart = isShortPass ? 0.34 : isLongPass ? 0.56 : 0.74;
+      const kickLegEnd = isShortPass ? -0.56 : isLongPass ? -0.96 : -1.18;
+      const kickLegX = kickPhase < 0.34
+        ? kickLegStart * windup
+        : THREE.MathUtils.lerp(kickLegStart, kickLegEnd, strike);
+      const kickKnee = kickPhase < 0.34
+        ? (isShortPass ? 0.56 : 0.92) * windup
+        : THREE.MathUtils.lerp(isShortPass ? 0.56 : 0.92, isShortPass ? 0.32 : 0.1, strike);
+      const followRoll = (isShortPass ? 0.08 : 0.16) * (1 - follow);
+      this.setRpmPose("hips", 0.02, torsoTwist * 0.2, this.turnLean * 0.08 - followRoll, blend);
+      this.setRpmPose("spine", torsoLean + follow * 0.08, torsoTwist * 0.55, this.turnLean * 0.16, blend);
+      this.setRpmPose("chest", torsoLean * 0.95, torsoTwist, this.turnLean * 0.22, blend);
+      this.setRpmPose("head", 0.04 + follow * 0.04, -torsoTwist * 0.22, -this.turnLean * 0.1, blend);
+      this.setRpmPose("leftUpperLeg", supportLegX, -0.04, -0.08, blend);
+      this.setRpmPose("leftLowerLeg", isShortPass ? 0.2 : 0.28 + follow * 0.08, 0, 0, blend);
+      this.setRpmPose("leftFoot", -0.08 - follow * 0.04, 0, 0, blend);
+      this.setRpmPose("rightUpperLeg", kickLegX, 0.08, 0.14, blend);
+      this.setRpmPose("rightLowerLeg", kickKnee, 0, 0, blend);
+      this.setRpmPose("rightFoot", kickPhase < 0.34 ? -0.22 * windup : THREE.MathUtils.lerp(-0.22, 0.2, strike), 0, 0, blend);
+      this.setRpmPose("leftUpperArm", isShortPass ? -0.18 : -0.34 + follow * 0.12, -0.08, -0.18, blend);
+      this.setRpmPose("rightUpperArm", isShortPass ? 0.16 : 0.3, 0.12, 0.18, blend);
+      this.setRpmPose("leftLowerArm", -0.52, -0.04, -0.06, blend);
+      this.setRpmPose("rightLowerArm", -0.34, 0.06, 0.08, blend);
+      this.rpmAvatar.position.y = Math.sin(kickPhase * Math.PI) * (isShortPass ? 0.015 : 0.03);
+      return;
     }
 
-    // Subtle root bob so animation never looks frozen.
-    this.rpmAvatar.position.y = bob * (isMoving ? 1 : 0.6);
+    if (this.charge) {
+      const hold = clamp01(this.charge.hold / 1.3);
+      const isShotCharge = this.charge.type === "Space";
+      const isLongPassCharge = this.charge.type === "KeyQ";
+      const sway = Math.sin(this.runTime * 1.9) * 0.02;
+      const torsoLean = isShotCharge ? -0.14 - hold * 0.16 : isLongPassCharge ? -0.1 - hold * 0.12 : -0.06 - hold * 0.08;
+      const torsoTwist = isShotCharge ? -0.24 - hold * 0.1 : isLongPassCharge ? -0.18 - hold * 0.12 : -0.1 - hold * 0.06;
+      this.setRpmPose("hips", 0.02, torsoTwist * 0.2, sway + this.turnLean * 0.08, blend);
+      this.setRpmPose("spine", torsoLean, torsoTwist * 0.45, this.turnLean * 0.14, blend);
+      this.setRpmPose("chest", torsoLean * 0.9, torsoTwist, this.turnLean * 0.18, blend);
+      this.setRpmPose("head", 0.05, -torsoTwist * 0.24, -this.turnLean * 0.08, blend);
+      this.setRpmPose("leftUpperLeg", 0.14, -0.04, -0.08, blend);
+      this.setRpmPose("leftLowerLeg", 0.22 + hold * 0.08, 0, 0, blend);
+      this.setRpmPose("rightUpperLeg", 0.18 + hold * 0.44, 0.08, 0.14, blend);
+      this.setRpmPose("rightLowerLeg", 0.3 + hold * 0.44, 0, 0, blend);
+      this.setRpmPose("rightFoot", -0.08 - hold * 0.16, 0, 0, blend);
+      this.setRpmPose("leftUpperArm", isShotCharge ? -0.32 : -0.2, -0.1, -0.16, blend);
+      this.setRpmPose("rightUpperArm", isShotCharge ? 0.24 : 0.12, 0.12, 0.18, blend);
+      this.setRpmPose("leftLowerArm", -0.56, -0.04, -0.06, blend);
+      this.setRpmPose("rightLowerArm", -0.28, 0.06, 0.08, blend);
+      this.rpmAvatar.position.y = 0.008 + Math.abs(Math.sin(this.runTime * 1.6)) * 0.006;
+      return;
+    }
+
+    if (locomotionActive) {
+      const stride = THREE.MathUtils.clamp(actualSpeed / Math.max(0.01, sprinting ? this.sprintSpeed : this.walkSpeed), 0.15, 1);
+      const step = Math.sin(this.runTime);
+      const counter = Math.sin(this.runTime + Math.PI);
+      const sway = Math.sin(this.runTime * 0.5);
+      const dribbleBias = hasBall && !sprinting ? Math.max(0, Math.sin(this.runTime * 2.2)) * 0.14 : 0;
+      const legAmp = sprinting ? 0.92 : movingBack ? 0.34 : hasBall ? 0.48 : 0.62;
+      const armAmp = sprinting ? 0.5 : movingBack ? 0.18 : hasBall ? 0.2 : 0.34;
+      const kneeAmp = sprinting ? 0.42 : hasBall ? 0.26 : 0.34;
+      const torsoLean = sprinting ? -0.18 : movingBack ? 0.08 : hasBall ? -0.07 : -0.11;
+      const moveSign = movingBack ? -1 : 1;
+      const leftLeg = -step * legAmp * stride * moveSign + dribbleBias * 0.4;
+      const rightLeg = -counter * legAmp * stride * moveSign - dribbleBias;
+      const leftArm = counter * armAmp * stride * (movingBack ? -1 : 1);
+      const rightArm = step * armAmp * stride * (movingBack ? -1 : 1);
+      this.setRpmPose("hips", 0.01, sway * 0.02, this.turnLean * 0.1, blend);
+      this.setRpmPose("spine", torsoLean, 0, this.turnLean * 0.16 + sway * 0.03, blend);
+      this.setRpmPose("chest", torsoLean * 0.8, hasBall ? sway * 0.04 : 0, this.turnLean * 0.2, blend);
+      this.setRpmPose("head", movingBack ? 0.04 : 0, Math.sin(this.runTime * 0.38) * 0.03, -this.turnLean * 0.08, blend);
+      this.setRpmPose("leftUpperLeg", leftLeg, 0, -sway * 0.05, blend);
+      this.setRpmPose("rightUpperLeg", rightLeg, 0, sway * 0.05, blend);
+      this.setRpmPose("leftLowerLeg", Math.max(0, step) * kneeAmp * stride, 0, 0, blend);
+      this.setRpmPose("rightLowerLeg", Math.max(0, counter) * kneeAmp * stride, 0, 0, blend);
+      this.setRpmPose("leftFoot", -Math.max(0, -leftLeg) * 0.22, 0, 0, blend);
+      this.setRpmPose("rightFoot", -Math.max(0, -rightLeg) * 0.22, 0, 0, blend);
+      this.setRpmPose("leftUpperArm", leftArm - 0.16, -0.04, hasBall ? -0.08 : -0.12, blend);
+      this.setRpmPose("rightUpperArm", rightArm - 0.16, 0.04, hasBall ? 0.08 : 0.12, blend);
+      this.setRpmPose("leftLowerArm", -0.34 - Math.abs(leftArm) * 0.42, 0, -0.04, blend);
+      this.setRpmPose("rightLowerArm", -0.34 - Math.abs(rightArm) * 0.42, 0, 0.04, blend);
+      this.rpmAvatar.position.y = Math.abs(Math.sin(this.runTime * 2)) * (sprinting ? 0.026 : 0.016 + stride * 0.008);
+      return;
+    }
+
+    const breath = Math.sin(this.runTime * 0.9);
+    const sway = Math.sin(this.runTime * 0.42);
+    this.setRpmPose("hips", 0.01 + breath * 0.015, sway * 0.02, sway * 0.02, blend * 0.55);
+    this.setRpmPose("spine", -0.02 + breath * 0.04, 0, sway * 0.03, blend * 0.55);
+    this.setRpmPose("chest", -0.03 + breath * 0.05, 0, sway * 0.04, blend * 0.55);
+    this.setRpmPose("head", 0.01, sway * 0.06, -sway * 0.02, blend * 0.5);
+    this.setRpmPose("leftUpperLeg", sway * 0.03, 0, -0.02, blend * 0.5);
+    this.setRpmPose("rightUpperLeg", -sway * 0.03, 0, 0.02, blend * 0.5);
+    this.setRpmPose("leftLowerLeg", 0.02, 0, 0, blend * 0.45);
+    this.setRpmPose("rightLowerLeg", 0.02, 0, 0, blend * 0.45);
+    this.setRpmPose("leftUpperArm", -0.16 + breath * 0.03, -0.04, -0.08, blend * 0.5);
+    this.setRpmPose("rightUpperArm", -0.16 - breath * 0.03, 0.04, 0.08, blend * 0.5);
+    this.setRpmPose("leftLowerArm", -0.38, 0, -0.04, blend * 0.45);
+    this.setRpmPose("rightLowerArm", -0.38, 0, 0.04, blend * 0.45);
+    this.rpmAvatar.position.y = Math.abs(breath) * 0.008;
   }
 
   applyRpmClipArmCorrection(dt, isMoving, sprinting, inputForward = 0) {
     if (!this.rpmAvatar || !this.rpmRig) return;
+    if (this.useDirectFbxClips) return;
     const blend = THREE.MathUtils.clamp(dt * 10, 0.08, 0.38);
     const movingBack = isMoving && inputForward < -0.15;
     const wave = Math.sin(this.runTime * (sprinting ? 1.25 : 1.0));
@@ -2420,16 +2428,6 @@ export class Player {
   }
 
   applySkillAnimation(state, dt) {
-    const clipName = state.descriptor.animation.clipName;
-    if (this.rpmAvatar && this.rpmActions[clipName]) {
-      if (this.rpmCurrentActionName !== clipName || !this.rpmActions[clipName].isRunning()) {
-        this.playRpmAction(clipName, 0.05);
-      }
-      this.rpmMixer?.update(dt);
-      this.applySkillRpmAccent(state, dt);
-      return;
-    }
-
     if (this.rpmAvatar) {
       this.applySkillRpmFallbackPose(state, dt);
       return;
@@ -2870,10 +2868,11 @@ export class Player {
     this.applyDribbling(dt, sprinting, isMoving);
   }
 
-  triggerKick(style = "shot") {
+  triggerKick(style = "shot", variant = null) {
     if (this.celebration.active || this.slideState.active) return false;
     this.kickAnim = 1.0; // Starts the kick swing
-    this.kickStyle = style === "bicycle" ? "bicycle" : "shot";
+    this.kickStyle = style === "bicycle" ? "bicycle" : style === "pass" ? "pass" : "shot";
+    this.kickVariant = variant || (this.kickStyle === "pass" ? "shortPass" : this.kickStyle);
     this.lastKickTime = performance.now();
     this.pendingRpmKick = true;
     this.pendingRpmKickName = this.kickStyle === "bicycle" ? "kickBicycle" : "kickShot";
@@ -2883,7 +2882,7 @@ export class Player {
   triggerBicycleKick() {
     if (this.celebration.active || this.isSkillActive() || this.slideState.active || this.charge) return false;
     this.velocity.multiplyScalar(0.18);
-    return this.triggerKick("bicycle");
+    return this.triggerKick("bicycle", "bicycle");
   }
 
   isGoalCelebrating() {
@@ -2931,6 +2930,7 @@ export class Player {
     this.charge = null;
     this.kickAnim = 0;
     this.kickStyle = "shot";
+    this.kickVariant = "shot";
     this.pendingRpmKick = false;
     this.mesh.rotation.x = 0;
     this.mesh.rotation.z = 0;
@@ -2938,10 +2938,6 @@ export class Player {
       this.rpmMixer.stopAllAction();
       this.rpmCurrentAction = null;
       this.rpmCurrentActionName = null;
-    }
-    if (this.rpmAvatar && this.useDirectFbxClips && this.rpmActions?.idle) {
-      this.playRpmAction("idle", 0.05);
-      this.rpmCurrentAction?.setEffectiveTimeScale(0.8);
     }
     this.onChargeEnd?.();
   }
@@ -2990,9 +2986,6 @@ export class Player {
     this.parts.shorts.rotation.set(0, 0, 0);
     this.setBodyHeave(0);
     if (this.rpmAvatar) this.rpmAvatar.position.y = 0;
-    if (this.rpmAnimReady && this.rpmActions.dribble) {
-      this.playRpmAction("dribble", 0.08);
-    }
     this.onGoalCelebrationEnd?.();
   }
 
@@ -3597,16 +3590,6 @@ export class Player {
     this.mesh.rotation.x = THREE.MathUtils.lerp(this.mesh.rotation.x, p.rootPitch + p.rootSpinX, blend);
     this.mesh.rotation.z = THREE.MathUtils.lerp(this.mesh.rotation.z, p.rootRoll, blend);
 
-    if (this.useDirectFbxClips) {
-      this.rpmMixer?.update?.(dt);
-      if (this.rpmActions?.idle && this.rpmCurrentActionName !== "idle") {
-        this.playRpmAction("idle", 0.08);
-        this.rpmCurrentAction?.setEffectiveTimeScale(0.8);
-      }
-      this.rpmAvatar.position.y = p.bob;
-      return;
-    }
-
     this.setRpmPose("leftUpperArm", p.lAx, p.lAy - 0.04, p.lAz, blend);
     this.setRpmPose("rightUpperArm", p.rAx, p.rAy + 0.04, p.rAz, blend);
     this.setRpmPose("leftLowerArm", p.lForearmX, p.lForearmY, p.lForearmZ - 0.06, blend);
@@ -4052,4 +4035,5 @@ export class Player {
     return this.queueSkill(index);
   }
 }
+
 
